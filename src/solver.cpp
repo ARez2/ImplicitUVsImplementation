@@ -67,11 +67,13 @@ void addEdge(std::unordered_map<int, int> &node_to_unknown,
   int ii = -1;
   int jj = -1;
   auto it = node_to_unknown.find(i);
-  if (it != node_to_unknown.end())
+  if (it != node_to_unknown.end()) {
     ii = 3 * it->second;
+  }
   it = node_to_unknown.find(j);
-  if (it != node_to_unknown.end())
+  if (it != node_to_unknown.end()) {
     jj = 3 * it->second;
+  }
 
   auto add = [&](int r, int c, const Mat3 &B) {
     if (r < 0 || c < 0)
@@ -189,8 +191,16 @@ Eigen::VectorXd solve_frames(std::unordered_map<int, int> &node_to_unknown,
 void addOffsetEdge(std::unordered_map<int, int> &node_to_unknown,
                    std::vector<Triplet> &T, Eigen::VectorXd &b, int i, int j,
                    const Vec2 &logmap, double w) {
-  int ii = (i == 0) ? -1 : 2 * node_to_unknown[i];
-  int jj = (j == 0) ? -1 : 2 * node_to_unknown[j];
+  int ii = -1;
+  int jj = -1;
+  auto it = node_to_unknown.find(i);
+  if (it != node_to_unknown.end()) {
+    ii = 2 * it->second;
+  }
+  it = node_to_unknown.find(j);
+  if (it != node_to_unknown.end()) {
+    jj = 2 * it->second;
+  }
 
   auto addBlock = [&](int r, int c, const Mat2 &M) {
     if (r < 0 || c < 0)

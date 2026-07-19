@@ -333,18 +333,9 @@ LogMap compute_blended_uvs(vec3 pt) {
             vec2 data = neighbors.neighbor_list[i];
             int j = int(data.x);
             Seed pj = get_seed(j);
-
-            // The papers says that we need weight from j to i, not the other way around.
-            // So fetch neighbors of j, check which one is i and save that weight.
-            float d_ji = 0.0;
-            Neighbors j_neighbors = get_neighbors(j);
-            for (int k = 0; k < j_neighbors.count; k++) {
-                vec2 d = j_neighbors.neighbor_list[k];
-                if (int(d.x) == best_idx) {
-                    d_ji = d.y;
-                    break;
-                }
-            }
+            // The papers says that we need weight from j to i
+            // but that should be the same as from i to j
+            float d_ji = data.y;
 
             // test from sec. 4.3.3
             if (pow(best_geo_dist, 2.0) + 2.0 * params.ImplicitUVsBlending * d_ji >= pow(distance(pt, pj.position), 2.0)) {
@@ -362,7 +353,9 @@ LogMap compute_blended_uvs(vec3 pt) {
             }
         }
 
-        best_logmap.uv = (L + wi * best_logmap.uv) / (W + wi);
+        // deviation from the paper (downloaded 30.4.26)
+        // following a suggestion from one of the authors
+        best_logmap.uv = (L + wi * (best_logmap.uv + pi.offset)) / (W + wi);
         return best_logmap;
     }
 }
@@ -392,7 +385,7 @@ void precalculate_implicituvs() {
 
             // FIXME: why does the walk from the exact seed position go through the middle?
             // might be related to instability of normal or tangentplane projection
-            LogMap map_between_seeds = compute_logmap(pi.position + pi.e1 * 0.01, pj, MAX_WALK_DIST);
+            LogMap map_between_seeds = compute_logmap(pi.position + pi.e1 * 0.005, pj, MAX_WALK_DIST);
 
             if (map_between_seeds.return_code == ERR_LOGMAP_OK) {
                 min_dist = min(min_dist, map_between_seeds.geodesic_dist);
@@ -408,3 +401,4 @@ void precalculate_implicituvs() {
 
     precalc_buffer.NewBlendingWidth = (1.0 / 3.0) * min_dist;
 }
+
