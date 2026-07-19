@@ -61,9 +61,9 @@ MyExtension::~MyExtension() {
 // So now we know:
 // H = [ I, -A^T
 //       A^T, I ]
-void addEdge(std::unordered_map<int, int> &node_to_unknown,
-             std::vector<Triplet> &T, Eigen::VectorXd &b, int i, int j,
-             const Mat3 &A, double w, const Eigen::Vector3d &fixed_frame) {
+void add_edge(std::unordered_map<int, int> &node_to_unknown,
+              std::vector<Triplet> &T, Eigen::VectorXd &b, int i, int j,
+              const Mat3 &A, double w, const Eigen::Vector3d &fixed_frame) {
   int ii = -1;
   int jj = -1;
   auto it = node_to_unknown.find(i);
@@ -140,7 +140,7 @@ Eigen::VectorXd solve_frames(std::unordered_map<int, int> &node_to_unknown,
           {trans.basis.rows[2].x, trans.basis.rows[2].y,
            trans.basis.rows[2].z}};
 
-      addEdge(node_to_unknown, triplets, b, i, j, A, w, fixed_eigen);
+      add_edge(node_to_unknown, triplets, b, i, j, A, w, fixed_eigen);
     }
   }
 
@@ -188,9 +188,9 @@ Eigen::VectorXd solve_frames(std::unordered_map<int, int> &node_to_unknown,
   return x;
 }
 
-void addOffsetEdge(std::unordered_map<int, int> &node_to_unknown,
-                   std::vector<Triplet> &T, Eigen::VectorXd &b, int i, int j,
-                   const Vec2 &logmap, double w) {
+void add_offset_edge(std::unordered_map<int, int> &node_to_unknown,
+                     std::vector<Triplet> &T, Eigen::VectorXd &b, int i, int j,
+                     const Vec2 &logmap, double w) {
   int ii = -1;
   int jj = -1;
   auto it = node_to_unknown.find(i);
@@ -202,7 +202,7 @@ void addOffsetEdge(std::unordered_map<int, int> &node_to_unknown,
     jj = 2 * it->second;
   }
 
-  auto addBlock = [&](int r, int c, const Mat2 &M) {
+  auto add = [&](int r, int c, const Mat2 &M) {
     if (r < 0 || c < 0)
       return;
 
@@ -214,10 +214,10 @@ void addOffsetEdge(std::unordered_map<int, int> &node_to_unknown,
   double dm = 1.0 / (w * w);
   Mat2 I = dm * Mat2::Identity();
 
-  addBlock(ii, ii, I);
-  addBlock(ii, jj, -I);
-  addBlock(jj, ii, -I);
-  addBlock(jj, jj, I);
+  add(ii, ii, I);
+  add(ii, jj, -I);
+  add(jj, ii, -I);
+  add(jj, jj, I);
 
   // RHS
   if (ii >= 0)
@@ -246,7 +246,7 @@ Eigen::VectorXd solve_offsets(std::unordered_map<int, int> &node_to_unknown,
       Vector2 uv = uvs[e];
       Vec2 logmap{uv.x, uv.y};
 
-      addOffsetEdge(node_to_unknown, triplets, b, i, j, logmap, w);
+      add_offset_edge(node_to_unknown, triplets, b, i, j, logmap, w);
     }
   }
 
