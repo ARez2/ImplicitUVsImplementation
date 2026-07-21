@@ -221,7 +221,11 @@ LogMap compute_logmap(vec3 query_pt, Seed seed, float max_walk_dist) {
 
         // transport_matrix = transport_matrix * build_rotation_matrix(n, n_next);
         transport_matrix = transport_matrix * build_rotation_matrix(n_next, n);
-        accum_length += distance(next_pos, cur_pos);
+
+        // Arc length of gamma_i over [0, tau] via Simpson's rule (sec. 3.2):
+        float speed_mid = sqrt(1.0 + pow(tau * 0.5, 2.0) * pow(alpha, 2.0));
+        float speed_end = sqrt(1.0 + pow(tau, 2.0) * pow(alpha, 2.0));
+        accum_length += (tau / 6.0) * (1.0 + 4.0 * speed_mid + speed_end);
         if (accum_length + distance(next_pos, seed.position) > max_walk_dist) {
             FAIL.return_code = ERR_LOGMAP_MAX_DIST;
             return FAIL;
