@@ -175,8 +175,11 @@ LogMap compute_logmap(vec3 query_pt, Seed seed, float max_walk_dist) {
     vec3 cur_pos = query_pt;
     vec3 prev_pos = cur_pos;
     float accum_length = 0.0;
-    // cache this since we calc the next normal for the sharp feature detection
-    vec3 n = calcNormal(cur_pos);
+    // Gradient at the current point, carried across iterations (updated at the
+    // bottom of the loop) so the field is never evaluated twice at one location.
+    vec3 gradient = calcGradient(cur_pos);
+    float grad_len = length(gradient);
+    vec3 n = gradient / grad_len;
     // this is called "R" in the paper. Initialized as identity
     mat3 transport_matrix = mat3(1.0);
 
@@ -192,24 +195,28 @@ LogMap compute_logmap(vec3 query_pt, Seed seed, float max_walk_dist) {
         // normalize v
         v /= len_v;
         // Local quadratic (curvature) coefficient of the geodesic (eq. 16):
-        vec3 gradient = calcGradient(cur_pos);
-        float grad_len = length(gradient);
+        //   alpha = -<v, H_f v> / ||grad f||. grad_len is reused from the previous
+        //   step's projection point (next_pos ~ step_tmp_pos), so we skip a second
+        //   gradient evaluation at cur_pos.
         float curvature = hessian_three_point(cur_pos, v); // <v, H_f(x_i) v>
         float alpha = -curvature / grad_len;
+        float alpha2 = alpha * alpha;
 
         // Compute adaptive time step (sec 3.6.2, eq. 34).
         // When the surface is flat (H_f = 0 => alpha = 0), we recover tau = s.
-        float s = distance(cur_pos, seed.position) / float(MAX_STEPS - i);
+        // dir == seed.position - cur_pos, so length(dir) is the distance to the seed.
+        float s = length(dir) / float(MAX_STEPS - i);
         float tau;
-        if (abs(alpha) < 1e-6) {
+        if (alpha2 < 1e-12) {
             tau = s;
         } else {
-            tau = sqrt((sqrt(1.0 + pow(s, 2) * pow(alpha, 2)) - 1.0) / (pow(alpha, 2) * 0.5));
+            tau = sqrt(2.0 * (sqrt(1.0 + s * s * alpha2) - 1.0) / alpha2);
         }
+        float tau2 = tau * tau;
 
         // One second-order geodesic step (eq. 16):
         //   gamma_i(tau) = x_i + tau v + (tau^2 / 2) alpha n
-        vec3 step_tmp_pos = cur_pos + tau * v + (pow(tau, 2) * 0.5) * alpha * n;
+        vec3 step_tmp_pos = cur_pos + tau * v + (0.5 * tau2) * alpha * n;
 
         // project back onto the surface (eq. 18): Pi_f(x) = x - f(x) grad f / ||grad f||^2
         // (no assumption that ||grad f|| == 1).
@@ -227,9 +234,11 @@ LogMap compute_logmap(vec3 query_pt, Seed seed, float max_walk_dist) {
         // transport_matrix = transport_matrix * build_rotation_matrix(n, n_next);
         transport_matrix = transport_matrix * build_rotation_matrix(n_next, n);
 
-        // Arc length of gamma_i over [0, tau] via Simpson's rule (sec. 3.2):
-        float speed_mid = sqrt(1.0 + pow(tau * 0.5, 2.0) * pow(alpha, 2.0));
-        float speed_end = sqrt(1.0 + pow(tau, 2.0) * pow(alpha, 2.0));
+        // Arc length of gamma_i over [0, tau] via Simpson's rule (sec. 3.2).
+        // ||gamma'(t)|| = sqrt(1 + t^2 alpha^2); reuse tau^2 * alpha^2.
+        float tau2alpha2 = tau2 * alpha2;
+        float speed_mid = sqrt(1.0 + 0.25 * tau2alpha2);
+        float speed_end = sqrt(1.0 + tau2alpha2);
         accum_length += (tau / 6.0) * (1.0 + 4.0 * speed_mid + speed_end);
         if (accum_length + distance(next_pos, seed.position) > max_walk_dist) {
             FAIL.return_code = ERR_LOGMAP_MAX_DIST;
@@ -239,6 +248,7 @@ LogMap compute_logmap(vec3 query_pt, Seed seed, float max_walk_dist) {
         prev_pos = cur_pos;
         cur_pos = next_pos;
         n = n_next;
+        grad_len = grad_next_len; // carry this point's gradient magnitude forward
     }
     float final_dist = distance(cur_pos, seed.position);
     if (final_dist < MIN_WALK_DIST) {
