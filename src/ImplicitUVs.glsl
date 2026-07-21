@@ -390,8 +390,10 @@ void precalculate_implicituvs() {
             if (map_between_seeds.return_code == ERR_LOGMAP_OK) {
                 min_dist = min(min_dist, map_between_seeds.geodesic_dist);
                 merging_graph.MergingGraphWeights[n] = map_between_seeds.geodesic_dist;
-                // R_{i -> j} in the paper
-                precalc_buffer.TransportMatrices[n] = map_between_seeds.parallel_transport_matrix;
+                // R_{i -> j} in the paper (Eq. 45/48). The walk uses seed = pj,
+                // query = pi, so compute_logmap returns R_{T_pj M -> T_pi M} = R_{j -> i}.
+                // The frame solver expects R_{i -> j}, so transpose (== inverse for a rotation).
+                precalc_buffer.TransportMatrices[n] = transpose(map_between_seeds.parallel_transport_matrix);
                 precalc_buffer.Logmaps[n] = map_between_seeds.uv;
             } else {
                 merging_graph.MergingGraphWeights[n] = -float(map_between_seeds.return_code) * 10.0;
@@ -401,4 +403,3 @@ void precalculate_implicituvs() {
 
     precalc_buffer.NewBlendingWidth = (1.0 / 3.0) * min_dist;
 }
-
