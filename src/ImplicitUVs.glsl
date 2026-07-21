@@ -161,7 +161,7 @@ mat3 build_rotation_matrix(vec3 n1, vec3 n2) {
 LogMap compute_logmap(vec3 query_pt, Seed seed, float max_walk_dist) {
     LogMap FAIL = LogMap(ERR_LOGMAP_OTHER, vec2(0.0), FLOAT_INF, mat3(1.0));
     // The distance to the seed which the walk MUST reach, else its a fail (r_min in the paper)
-    const float MIN_WALK_DIST = 0.1;
+    const float MIN_WALK_DIST = 1.0;
     const int MAX_STEPS = 16 * 1;
     const float EPS_1 = 0.001;
     const float EPS_SHARP = 0.2;
@@ -191,28 +191,30 @@ LogMap compute_logmap(vec3 query_pt, Seed seed, float max_walk_dist) {
         }
         // normalize v
         v /= len_v;
-        // Compute adaptive time step (sec 3.6.2, eq. 34)
-        float s = distance(cur_pos, seed.position) / float(MAX_STEPS - i);
-        float alpha = params.ImplicitUVsAlpha;
-        float tau = sqrt((sqrt(1.0 + pow(s, 2) * pow(alpha, 2)) - 1.0) / (pow(alpha, 2) * 0.5));
-
-        float curvature = hessian_three_point(cur_pos, v);
-        // do one step on the exponential map:
+        // Local quadratic (curvature) coefficient of the geodesic (eq. 16):
         vec3 gradient = calcGradient(cur_pos);
+        float grad_len = length(gradient);
+        float curvature = hessian_three_point(cur_pos, v); // <v, H_f(x_i) v>
+        float alpha = -curvature / grad_len;
 
-        // testing:
-        curvature = length(gradient);
+        // Compute adaptive time step (sec 3.6.2, eq. 34).
+        // When the surface is flat (H_f = 0 => alpha = 0), we recover tau = s.
+        float s = distance(cur_pos, seed.position) / float(MAX_STEPS - i);
+        float tau;
+        if (abs(alpha) < 1e-6) {
+            tau = s;
+        } else {
+            tau = sqrt((sqrt(1.0 + pow(s, 2) * pow(alpha, 2)) - 1.0) / (pow(alpha, 2) * 0.5));
+        }
 
-        // step with curvature correction (sec. 3.3 eq 24):
-        vec3 step_tmp_pos = cur_pos + tau * v - (pow(tau, 2) / (2.0 * length(gradient))) * curvature * n;
-        // step without curvature correction:
-        // step_tmp_pos = cur_pos + tau * v;
+        // One second-order geodesic step (eq. 16):
+        //   gamma_i(tau) = x_i + tau v + (tau^2 / 2) alpha n
+        vec3 step_tmp_pos = cur_pos + tau * v + (pow(tau, 2) * 0.5) * alpha * n;
 
-        // project back onto the surface:
+        // project back onto the surface (eq. 18, length(n) == 1):
         vec3 n_next = calcNormal(step_tmp_pos);
-        vec3 next_pos = step_tmp_pos - sceneSDF(step_tmp_pos).depth * n_next; // eq. 18 with length(n) == 1
+        vec3 next_pos = step_tmp_pos - sceneSDF(step_tmp_pos).depth * n_next;
 
-        //n_next = calcNormal(next_pos);
         // sharp feature detection (sec 3.5.2)
         if (dot(n_next, n) < 1.0 - EPS_SHARP) {
             FAIL.return_code = ERR_LOGMAP_SHARP_FEATURE;
