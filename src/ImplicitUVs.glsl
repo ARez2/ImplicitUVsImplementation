@@ -134,7 +134,7 @@ struct LogMap {
 };
 
 // The maximum distance the logmap walk (alg. 1) is allowed to walk
-const float MAX_WALK_DIST = 20.0;
+const float MAX_WALK_DIST = 2000.0;
 
 // Calculates a matrix, that transforms a vector from one tangent plane (given by n1) to the next (given by n2)
 // It does the minimal rotation neccessary
@@ -211,9 +211,12 @@ LogMap compute_logmap(vec3 query_pt, Seed seed, float max_walk_dist) {
         //   gamma_i(tau) = x_i + tau v + (tau^2 / 2) alpha n
         vec3 step_tmp_pos = cur_pos + tau * v + (pow(tau, 2) * 0.5) * alpha * n;
 
-        // project back onto the surface (eq. 18, length(n) == 1):
-        vec3 n_next = calcNormal(step_tmp_pos);
-        vec3 next_pos = step_tmp_pos - sceneSDF(step_tmp_pos).depth * n_next;
+        // project back onto the surface (eq. 18): Pi_f(x) = x - f(x) grad f / ||grad f||^2
+        // (no assumption that ||grad f|| == 1).
+        vec3 grad_next = calcGradient(step_tmp_pos);
+        float grad_next_len = length(grad_next);
+        vec3 n_next = grad_next / grad_next_len; // unit normal
+        vec3 next_pos = step_tmp_pos - sceneSDF(step_tmp_pos).depth * grad_next / (grad_next_len * grad_next_len);
 
         // sharp feature detection (sec 3.5.2)
         if (dot(n_next, n) < 1.0 - EPS_SHARP) {
