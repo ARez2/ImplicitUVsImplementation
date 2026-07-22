@@ -118,16 +118,14 @@ vec3 project_onto_tangentplane(vec3 dir, vec3 n) {
     return dir - n * dot(dir, n);
 }
 
-// Tetrahedron technique from
-// https://iquilezles.org/articles/normalsSDF/
-// but with division by h
+// Central-difference finite differences (2 evals per axis).
 vec3 calc_discrete_gradient(vec3 p) {
     const float h = EPSILON;
-    const vec2 k = vec2(1, -1);
-    return (k.xyy * sceneSDF(p + k.xyy * h).depth +
-        k.yyx * sceneSDF(p + k.yyx * h).depth +
-        k.yxy * sceneSDF(p + k.yxy * h).depth +
-        k.xxx * sceneSDF(p + k.xxx * h).depth) / h;
+    return vec3(
+        sceneSDF(p + vec3(h, 0.0, 0.0)).depth - sceneSDF(p - vec3(h, 0.0, 0.0)).depth,
+        sceneSDF(p + vec3(0.0, h, 0.0)).depth - sceneSDF(p - vec3(0.0, h, 0.0)).depth,
+        sceneSDF(p + vec3(0.0, 0.0, h)).depth - sceneSDF(p - vec3(0.0, 0.0, h)).depth
+    ) / (2.0 * h);
 }
 
 const int ERR_LOGMAP_OK = 0;
@@ -156,6 +154,13 @@ mat3 build_rotation_matrix(vec3 n1, vec3 n2) {
     vec3 axis = cross(n1, n2);
     // the angle we want to rotate by
     float c = dot(n1, n2);
+    // Guard against the antipodal case (c -> -1), where 1/(1+c) diverges and the
+    // axis collapses to 0 -> NaN. Return a stable 180 deg rotation instead.
+    if (c < -0.9999) {
+        vec3 perp = abs(n1.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+        vec3 ax = normalize(cross(n1, perp));
+        return 2.0 * outerProduct(ax, ax) - mat3(1.0);
+    }
     // J = skew-symmetric matrix (also see Rodrigues-Rotation but from 2 normals)
     mat3 J = mat3(
             vec3(0.0, axis.z, -axis.y),
@@ -266,7 +271,12 @@ LogMap compute_logmap(vec3 query_pt, Seed seed, float max_walk_dist) {
     if (final_dist < MIN_WALK_DIST) {
         accum_length += final_dist;
 
-        vec3 seed_normal = normalize(cross(seed.e1, seed.e2));
+        // Use the field's outward normal at the seed. cross(e1, e2) is defined by
+        // the stored frame handedness and (for the provided seeds) points INWARD,
+        // i.e. opposite to the walk normals coming from calc_discrete_gradient. That makes
+        // build_rotation_matrix(seed_normal, n) a ~180 deg rotation and blows up
+        // the 1/(1+c) term -> NaN transport. The field normal is consistent with n.
+        vec3 seed_normal = calc_discrete_gradient(seed.position);
         vec3 t = normalize(project_onto_tangentplane(prev_pos - seed.position, seed_normal));
         vec2 uv = accum_length * vec2(dot(t, seed.e1), dot(t, seed.e2));
         // mat3 trans = transport_matrix * build_rotation_matrix(n, seed_normal);
@@ -284,6 +294,12 @@ float weighting_function(float t) {
 
 // sec. 4.3.1, eq. 40
 float get_weight(float d_x_pi, float d_x_pj, float d_pj_pi) {
+    // A failed precalc walk encodes a negative sentinel into the edge weight
+    // (see precalculate_implicituvs). A non-positive inter-seed distance is
+    // invalid, so treat it as "no blending" instead of flipping the sign of d_Vij.
+    if (d_pj_pi <= 0.0) {
+        return 1.0;
+    }
     // sec. 4.3.1 eq. 39
     float d_Vij = (pow(d_x_pi, 2.0) - pow(d_x_pj, 2.0)) / (2.0 * d_pj_pi);
     if (d_Vij < -params.ImplicitUVsBlending) {
