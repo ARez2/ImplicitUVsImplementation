@@ -223,11 +223,12 @@ LogMap compute_logmap(vec3 query_pt, Seed seed, float max_walk_dist) {
         // When the surface is flat (H_f = 0 => alpha = 0), we recover tau = s.
         // dir == seed.position - cur_pos, so length(dir) is the distance to the seed.
         float s = length(dir) / float(MAX_STEPS - i);
+        float x = s * s * alpha2;
         float tau;
         if (alpha2 < 1e-12) {
             tau = s;
         } else {
-            tau = sqrt(2.0 * (sqrt(1.0 + s * s * alpha2) - 1.0) / alpha2);
+            tau = sqrt(2.0 * (x / (sqrt(1.0 + x) + 1.0)) / alpha2);
         }
         float tau2 = tau * tau;
 
