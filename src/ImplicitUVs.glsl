@@ -118,6 +118,18 @@ vec3 project_onto_tangentplane(vec3 dir, vec3 n) {
     return dir - n * dot(dir, n);
 }
 
+// Tetrahedron technique from
+// https://iquilezles.org/articles/normalsSDF/
+// but with division by h
+vec3 calc_discrete_gradient(vec3 p) {
+    const float h = EPSILON;
+    const vec2 k = vec2(1, -1);
+    return (k.xyy * sceneSDF(p + k.xyy * h).depth +
+        k.yyx * sceneSDF(p + k.yyx * h).depth +
+        k.yxy * sceneSDF(p + k.yxy * h).depth +
+        k.xxx * sceneSDF(p + k.xxx * h).depth) / h;
+}
+
 const int ERR_LOGMAP_OK = 0;
 const int ERR_LOGMAP_MAX_DIST = 1;
 const int ERR_LOGMAP_SHARP_FEATURE = 2;
@@ -134,7 +146,7 @@ struct LogMap {
 };
 
 // The maximum distance the logmap walk (alg. 1) is allowed to walk
-const float MAX_WALK_DIST = 2000.0;
+const float MAX_WALK_DIST = 20.0;
 
 // Calculates a matrix, that transforms a vector from one tangent plane (given by n1) to the next (given by n2)
 // It does the minimal rotation neccessary
@@ -177,7 +189,7 @@ LogMap compute_logmap(vec3 query_pt, Seed seed, float max_walk_dist) {
     float accum_length = 0.0;
     // Gradient at the current point, carried across iterations (updated at the
     // bottom of the loop) so the field is never evaluated twice at one location.
-    vec3 gradient = calcGradient(cur_pos);
+    vec3 gradient = calc_discrete_gradient(cur_pos);
     float grad_len = length(gradient);
     vec3 n = gradient / grad_len;
     // this is called "R" in the paper. Initialized as identity
@@ -220,7 +232,7 @@ LogMap compute_logmap(vec3 query_pt, Seed seed, float max_walk_dist) {
 
         // project back onto the surface (eq. 18): Pi_f(x) = x - f(x) grad f / ||grad f||^2
         // (no assumption that ||grad f|| == 1).
-        vec3 grad_next = calcGradient(step_tmp_pos);
+        vec3 grad_next = calc_discrete_gradient(step_tmp_pos);
         float grad_next_len = length(grad_next);
         vec3 n_next = grad_next / grad_next_len; // unit normal
         vec3 next_pos = step_tmp_pos - sceneSDF(step_tmp_pos).depth * grad_next / (grad_next_len * grad_next_len);
@@ -422,3 +434,4 @@ void precalculate_implicituvs() {
 
     precalc_buffer.NewBlendingWidth = (1.0 / 3.0) * min_dist;
 }
+
