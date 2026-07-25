@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://mcpeyu78r0td"
+path="res://.godot/imported/implicit_uvs.glsl-17114ce44e44fb842e4b2d90059a896e.res"
+
+[deps]
+
+source_file="res://shaders/implicit_uvs.glsl"
+dest_files=["res://.godot/imported/implicit_uvs.glsl-17114ce44e44fb842e4b2d90059a896e.res"]
+
+[params]
+

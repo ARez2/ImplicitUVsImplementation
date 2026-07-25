@@ -1,0 +1,99 @@
+[gd_scene format=3 uid="uid://dynp1iheis2bo"]
+
+[ext_resource type="Script" uid="uid://dmxy68coh4g1n" path="res://main.gd" id="1_h2yge"]
+[ext_resource type="Texture2D" uid="uid://yulb4i0cvyur" path="res://assets/checkerboard.jpg" id="2_5vw27"]
+[ext_resource type="Script" uid="uid://81quafrmbi1b" path="res://sdf_mesh.gd" id="4_1bvp3"]
+[ext_resource type="Shader" uid="uid://bafmq8fgaam74" path="res://display_texture.gdshader" id="6_272bh"]
+[ext_resource type="PackedScene" uid="uid://bts105g652v5w" path="res://scenes/coordinate_system.tscn" id="8_5vw27"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_272bh"]
+sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+ground_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+
+[sub_resource type="Sky" id="Sky_5vw27"]
+sky_material = SubResource("ProceduralSkyMaterial_272bh")
+
+[sub_resource type="Environment" id="Environment_kek77"]
+background_mode = 2
+sky = SubResource("Sky_5vw27")
+
+[sub_resource type="QuadMesh" id="QuadMesh_h2yge"]
+flip_faces = true
+size = Vector2(2, 2)
+
+[sub_resource type="Texture2DRD" id="Texture2DRD_272bh"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_kek77"]
+render_priority = 0
+shader = ExtResource("6_272bh")
+shader_parameter/tex = SubResource("Texture2DRD_272bh")
+
+[sub_resource type="BoxMesh" id="BoxMesh_272bh"]
+size = Vector3(3, 0.09, 3)
+
+[sub_resource type="SphereMesh" id="SphereMesh_eav63"]
+
+[sub_resource type="TorusMesh" id="TorusMesh_ut10d"]
+
+[node name="Main" type="Node3D" unique_id=1007458214]
+script = ExtResource("1_h2yge")
+ImplicitUVsBlending = 0.39228058
+ColorTex = ExtResource("2_5vw27")
+VisualizeSeeds = true
+UpdateSeedsAfterPrecalc = true
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=589760633]
+environment = SubResource("Environment_kek77")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1766635412]
+transform = Transform3D(-0.9364017, 0.30391434, -0.17546497, 2.579911e-08, 0.4999999, 0.8660255, 0.35093004, 0.8109478, -0.46820074, 0, 7.6346846, 0)
+shadow_enabled = true
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=971430544]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.142013, 7.070738)
+
+[node name="RaymarcherTexShower" type="MeshInstance3D" parent="Camera3D" unique_id=285155861]
+unique_name_in_owner = true
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.15369606, -0.040740013, 0.07954335)
+extra_cull_margin = 16384.0
+mesh = SubResource("QuadMesh_h2yge")
+surface_material_override/0 = SubResource("ShaderMaterial_kek77")
+
+[node name="Scene" type="Node3D" parent="." unique_id=769119868]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.82370716, 0)
+
+[node name="PlaneAndSphere" type="Node3D" parent="Scene" unique_id=546682526]
+
+[node name="Plane" type="MeshInstance3D" parent="Scene/PlaneAndSphere" unique_id=723121197]
+mesh = SubResource("BoxMesh_272bh")
+script = ExtResource("4_1bvp3")
+metadata/_custom_type_script = "uid://81quafrmbi1b"
+
+[node name="CoordinateSystem 0" type="Node3D" parent="Scene/PlaneAndSphere/Plane" unique_id=819746170 instance=ExtResource("8_5vw27")]
+transform = Transform3D(0.33, 2.8849517e-08, 0, -2.8849517e-08, 0.33, 0, 0, 0, -0.33, -1.125, 0.045000017, -1.125)
+
+[node name="CoordinateSystem 1" type="Node3D" parent="Scene/PlaneAndSphere/Plane" unique_id=1037179510 instance=ExtResource("8_5vw27")]
+transform = Transform3D(0.32994798, 2.8844969e-08, 0.005860043, -2.8849517e-08, 0.33, 0, 0.005860043, 5.1230126e-10, -0.32994798, -1.125, 0.045000017, 1.125)
+
+[node name="CoordinateSystem 2" type="Node3D" parent="Scene/PlaneAndSphere/Plane" unique_id=1289731749 instance=ExtResource("8_5vw27")]
+transform = Transform3D(0.32999137, 2.884876e-08, 0.002389382, -2.8849517e-08, 0.33, 0, 0.002389382, 2.0888641e-10, -0.32999137, 1.125, 0.045000017, 0)
+
+[node name="Sphere" type="MeshInstance3D" parent="Scene/PlaneAndSphere" unique_id=364334174]
+transform = Transform3D(0.8530841, -0.5217641, 0.0031203027, 8.031904e-09, -0.005980174, -0.9999821, 0.52177346, 0.8530688, -0.005101587, 0, -0.2177993, 0)
+mesh = SubResource("SphereMesh_eav63")
+script = ExtResource("4_1bvp3")
+metadata/_custom_type_script = "uid://81quafrmbi1b"
+
+[node name="CoordinateSystem 0" type="Node3D" parent="Scene/PlaneAndSphere/Sphere" unique_id=591379406 instance=ExtResource("8_5vw27")]
+transform = Transform3D(-0.3300001, 2.3050235e-10, -1.0075578e-17, 0, 1.4424763e-08, 0.3300001, -2.3050235e-10, -0.3300001, 1.4424763e-08, -2.809748e-10, 6.9849193e-10, 0.50000024)
+visible = false
+
+[node name="CoordinateSystem 1" type="Node3D" parent="Scene/PlaneAndSphere/Sphere" unique_id=1586963001 instance=ExtResource("8_5vw27")]
+transform = Transform3D(0.28287032, -2.6789417e-08, -0.16995423, -0.16995426, 7.428936e-09, -0.28287026, -2.6789417e-08, -0.3300001, 7.428935e-09, -1.6455948e-10, 0, -0.5)
+
+[node name="Torus" type="MeshInstance3D" parent="Scene/PlaneAndSphere" unique_id=614964715]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3.0638454, 0.18884152, 0.19491267)
+visible = false
+mesh = SubResource("TorusMesh_ut10d")
+script = ExtResource("4_1bvp3")
+metadata/_custom_type_script = "uid://81quafrmbi1b"

@@ -1,0 +1,2 @@
+scons platform=linux target=template_release
+scons platform=windows target=template_release

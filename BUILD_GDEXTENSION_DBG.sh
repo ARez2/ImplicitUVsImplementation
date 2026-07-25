@@ -1,0 +1,1 @@
+scons platform=linux debug_symbols=yes dev_build=yes
