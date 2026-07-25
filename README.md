@@ -43,7 +43,7 @@ The main GDScript code is inside of [main.gd](main.gd). It does the following th
 - Handles the creation and updating of all buffers, uniforms, pipelines etc. neccessary for executing the compute shader using the `RenderingDevice`
 - After calling the compute shader, reads back some uniforms to pass the data into GDExtension module, which then outputs the results of the linear system optimization. This GDScript script then writes those values back into uniforms so that the next drawing can use them
 
-> [!IMPORTANT] Currently supported mesh types
+> [!IMPORTANT]
 > Right now, only the following Godot mesh types are supported (but it should be easy to extend):
 > - `SphereMesh`
 > - `BoxMesh`
