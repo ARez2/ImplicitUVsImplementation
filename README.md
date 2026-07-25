@@ -1,7 +1,7 @@
 # ImplicitUVsImplementation
 A Godot implementation of the paper "Implicit UVs: Real-time semi-global parameterization of implicit surfaces"[^1].
 
-The paper describes a way to texture signed distance functions procedurally by letting the user place so called **seeds** on the surface. Those seeds each define a local UV space around them (given by two basis vectors) and "the algorithm" will try to create a global UV field out of those seeds. For that, you need to select which seeds need to be merged together (using the `MergingGraph`).
+The paper describes a way to texture signed distance functions **in realtime** by letting the user place so called **seeds** on the surface. Those seeds each define a local UV space around them (given by two basis vectors) and "the algorithm" will try to create a global UV field out of those seeds. For that, you need to select which seeds need to be merged together (using the `MergingGraph`).
 
 ![explanation inside the Godot editor](imgs/explanation.png)
 
@@ -69,3 +69,5 @@ Also includes some code to perform a "precalculation". There, some values need t
 > [!TIP]
 > The shader code contains lots of comments, so it should be relatively easy to follow what it does and how it relates to the paper.
 
+## Acknowledgements
+Thank you **very much** to [Baptiste Genest](https://github.com/baptiste-genest), one of the original authors, for helping me find some issues with my initial implementation!
