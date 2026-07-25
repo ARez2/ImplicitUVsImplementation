@@ -14,6 +14,9 @@ Uses sphere tracing to render the signed distance functions. Also converts the G
 > I am not one of the authors. All credit goes to them.
 
 
+https://github.com/user-attachments/assets/56025b03-3b57-4c2f-8081-121120168573
+
+
 ## How it works
 
 The project has some CPU side code (shader setup, building the scene, linear solver) and some GPU code (mainly a raymarcher which uses my scene representation and runs the algorithms from the paper).
@@ -69,5 +72,5 @@ Also includes some code to perform a "precalculation". There, some values need t
 > [!TIP]
 > The shader code contains lots of comments, so it should be relatively easy to follow what it does and how it relates to the paper.
 
-## Acknowledgements
+## Acknowledgements ♥️
 Thank you **very much** to [Baptiste Genest](https://github.com/baptiste-genest), one of the original authors, for helping me find some issues with my initial implementation!
