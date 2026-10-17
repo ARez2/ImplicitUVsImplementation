@@ -33,6 +33,8 @@ layout(set = 0, binding = 2, std140) uniform CameraData {
     mat4 view_matrix;
 } camera_data;
 layout(set = 0, binding = 4) uniform sampler2D color_tex;
+layout(r32f, set = 0, binding = 5) uniform restrict writeonly image2D depth_image;
+
 
 // Push constants have a max size of 128 bytes (32 floats).
 layout(push_constant, std430) uniform Params {
@@ -188,6 +190,14 @@ HitInfo raymarch(vec3 eye, vec3 marchingDirection) {
 // - eye pos = camera position in world
 // - dir = ray direction from camera pos through that pixel in the world
 void main() {
+    if (params.PrecalcStage != 0) {
+        // only let the first invocation run the precalculation, so there are no data races
+        if (all(equal(gl_GlobalInvocationID, uvec3(0)))) {
+            precalculate_implicituvs();
+        }
+        return;
+    }
+
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
     vec2 resolution = params.ViewportSize;
     vec2 screen_uv = vec2(pos) / resolution;
@@ -203,29 +213,29 @@ void main() {
         vec3 p = eye_pos + raymarch_res.depth * dir;
         vec3 n = calcNormal(p);
 
-        if (params.PrecalcStage != 0) {
-            precalculate_implicituvs();
-        } else {
-            LogMap closest_logmap = compute_blended_uvs(p);
-            vec2 blend_uv = closest_logmap.uv;
-            color = texture(color_tex, blend_uv).rgb;
-            // color = vec3(blend_uv, 0.0);
-            #if 1 // Use this to debug reasons for compute_logmap/ geodesic walk fail
-            if (closest_logmap.return_code != ERR_LOGMAP_OK) {
-                switch (closest_logmap.return_code) {
-                    case ERR_LOGMAP_MAX_DIST:
-                    color = vec3(1.0, 0.0, 0.0);
-                    break;
-                    case ERR_LOGMAP_SHARP_FEATURE:
-                    color = vec3(0.0, 1.0, 0.0);
-                    break;
-                    case ERR_LOGMAP_MIN_DIST:
-                    color = vec3(0.0, 0.0, 1.0);
-                    break;
-                }
+        vec3 camera_forward = -normalize(camera_data.view_matrix[2].xyz);
+        float view_depth = dot(raymarch_res.depth * dir, camera_forward);
+        imageStore(depth_image, pos, vec4(view_depth, 0.0, 0.0, 0.0));
+
+        LogMap closest_logmap = compute_blended_uvs(p);
+        vec2 blend_uv = closest_logmap.uv;
+        color = texture(color_tex, blend_uv).rgb;
+        // color = vec3(blend_uv, 0.0);
+        #if 1 // Use this to debug reasons for compute_logmap/ geodesic walk fail
+        if (closest_logmap.return_code != ERR_LOGMAP_OK) {
+            switch (closest_logmap.return_code) {
+                case ERR_LOGMAP_MAX_DIST:
+                color = vec3(1.0, 0.0, 0.0);
+                break;
+                case ERR_LOGMAP_SHARP_FEATURE:
+                color = vec3(0.0, 1.0, 0.0);
+                break;
+                case ERR_LOGMAP_MIN_DIST:
+                color = vec3(0.0, 0.0, 1.0);
+                break;
             }
-            #endif
         }
+        #endif
 
         #define SHOW_SEEDS
         #ifdef SHOW_SEEDS
@@ -247,6 +257,7 @@ void main() {
     } else {
         // Didn't hit anything
         alpha = 0.0;
+        imageStore(depth_image, pos, vec4(0.0));
     }
 
     // Only write color if we arent precalculating
@@ -254,8 +265,3 @@ void main() {
         imageStore(write_image, pos, vec4(color, alpha));
     }
 }
-
-//void light() {
-//// Called for every pixel for every light affecting the CanvasItem.
-//// Uncomment to replace the default light processing function with this one.
-//}

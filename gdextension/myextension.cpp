@@ -32,23 +32,23 @@ MyExtension::~MyExtension() {
   // Add your cleanup here.
 }
 
-// E({ti​}) =  ∑_((i,j) ∈ E) (​∥Aij ti−tj​∥²)/(​wij²).
+// E({ti​}) =  ∑_((i,j) ∈ E) (​∥Rij ti−tj​∥²)/(​wij²).
 //
-// For one edge: E_{ij} =​ ∥A ti - tj​∥²
-// ∥x∥²=x^T x           ==>  ∥Ati​−tj​∥² = (Ati-tj)^T(Ati-tj)
-// (X-Y)^T = X^T - Y^t ==> (Ati-tj)^T = (Ati)^T - tj^T
-//                         (Ati)^T = ti^T A^T
-// So: (ti^T A^T - tj^T)(Ati-tj)
+// For one edge: E_{ij} =​ ∥R ti - tj​∥²
+// ∥x∥²=x^T x           ==>  ∥Rti​−tj​∥² = (Rti-tj)^T(Rti-tj)
+// (X-Y)^T = X^T - Y^t ==> (Rti-tj)^T = (Rti)^T - tj^T
+//                         (Rti)^T = ti^T R^T
+// So: (ti^T R^T - tj^T)(R ti-tj)
 // Multiply and shorten:
-// ti^T A^T Ati - 2ti^T A^T tj + tj^T tj
-// Because A is a rotation (A^T A = I):
-// E_{ij} =​ ti^T ti - 2ti^T A^T tj + tj^T tj
+// ti^T R^T R ti - 2ti^T R^T tj + tj^T tj
+// Because R is a rotation (R^T R = I):
+// E_{ij} =​ ti^T ti - 2ti^T R^T tj + tj^T tj
 
 // To get to the blocks we need this quadratic form:
 //     x^T H x    to be our energy from above
 // x = (ti, tj) so a 6D Vector
 // So now we need to find a matrix H which fulfills:
-// x^T H x = ti^T ti - 2ti^T A^T tj + tj^T tj
+// x^T H x = ti^T ti - 2ti^T R^T tj + tj^T tj
 // Lets take a general block matrix, where each entry is a 3x3 block:
 // H = [ B11, B12
 //       B21, B22 ]
@@ -58,14 +58,14 @@ MyExtension::~MyExtension() {
 // gives us 4 Blocks:
 // - ti^T B11 ti = ti^T ti  if B11 = I
 // - tj^T B12 tj = tj^T tj  if B22 = I
-// - ti^T B12 tj + tj^T B21 ti = -2 ti^T A^T tj if:
-//       B12 = -A^T   and   B21 = A^T
+// - ti^T B12 tj + tj^T B21 ti = -2 ti^T R^T tj if:
+//       B12 = -R^T   and   B21 = R^T
 // So now we know:
-// H = [ I, -A^T
-//       A^T, I ]
+// H = [ I, -R^T
+//       R^T, I ]
 void add_edge(std::unordered_map<int, int> &node_to_unknown,
               std::vector<Triplet> &T, Eigen::VectorXd &b, int i, int j,
-              const Mat3 &A, double w, const Eigen::Vector3d &fixed_frame) {
+              const Mat3 &R, double w, const Eigen::Vector3d &fixed_frame) {
   int ii = -1;
   int jj = -1;
   auto it = node_to_unknown.find(i);
@@ -90,8 +90,8 @@ void add_edge(std::unordered_map<int, int> &node_to_unknown,
   // both nodes unknown
   if (ii >= 0 && jj >= 0) {
     add(ii, ii, dm * Mat3::Identity());
-    add(ii, jj, -dm * A.transpose());
-    add(jj, ii, -dm * A);
+    add(ii, jj, -dm * R.transpose());
+    add(jj, ii, -dm * R);
     add(jj, jj, dm * Mat3::Identity());
     return;
   }
@@ -99,14 +99,14 @@ void add_edge(std::unordered_map<int, int> &node_to_unknown,
   // i known
   if (ii < 0 && jj >= 0) {
     add(jj, jj, dm * Mat3::Identity());
-    b.segment<3>(jj) += dm * (A * fixed_frame);
+    b.segment<3>(jj) += dm * (R * fixed_frame);
     return;
   }
 
   // j known
   if (ii >= 0 && jj < 0) {
     add(ii, ii, dm * Mat3::Identity());
-    b.segment<3>(ii) += dm * (A.transpose() * fixed_frame);
+    b.segment<3>(ii) += dm * (R.transpose() * fixed_frame);
     return;
   }
 }

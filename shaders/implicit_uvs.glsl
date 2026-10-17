@@ -4,6 +4,8 @@ const int TOTAL_NR_SEEDS = MAX_NUM_OBJECTS * NUM_SEEDS_PER_OBJ;
 const int NUM_MERGING_EDGES = TOTAL_NR_SEEDS * TOTAL_NR_SEEDS;
 const int MAX_NUM_MERGE_NEIGHBORS = 16;
 
+#define USE_WEIGHTS_APPROX_FOR_BLEND
+
 layout(set = 1, binding = 0, std430) restrict buffer SeedBuffer {
     mat4 Seeds[TOTAL_NR_SEEDS];
 } seed_buffer;
@@ -57,11 +59,12 @@ struct Seed {
     vec2 offset;
     // Some seeds might not be in active/ valid (but we need to return them in an array)
     bool enabled;
+    float max_walk_dist;
 };
 
 Seed get_seed(int global_seed_idx) {
     mat4 s = seed_buffer.Seeds[global_seed_idx];
-    return Seed(s[0].xyz, s[1].xyz, s[2].xyz, s[3].xy, bool(s[3].z));
+    return Seed(s[0].xyz, s[1].xyz, s[2].xyz, s[3].xy, bool(s[3].z), s[3].w);
 }
 
 Seed[NUM_SEEDS_PER_OBJ] get_seeds(int for_obj) {
@@ -178,10 +181,10 @@ mat3 build_rotation_matrix(vec3 n1, vec3 n2) {
 LogMap compute_logmap(vec3 query_pt, Seed seed, float max_walk_dist) {
     LogMap FAIL = LogMap(ERR_LOGMAP_OTHER, vec2(0.0), FLOAT_INF, mat3(1.0));
     // The distance to the seed which the walk MUST reach, else its a fail (r_min in the paper)
-    const float MIN_WALK_DIST = 1.0;
-    const int MAX_STEPS = 16 * 1;
-    const float EPS_1 = 0.001;
-    const float EPS_SHARP = 0.2;
+    const float MIN_WALK_DIST = 0.05;
+    const int MAX_STEPS = 24 * 1;
+    const float EPS_1 = 1e-3;
+    const float EPS_SHARP = 0.3;
 
     if (distance(query_pt, seed.position) > max_walk_dist) {
         // use this as reason for failure
@@ -200,6 +203,10 @@ LogMap compute_logmap(vec3 query_pt, Seed seed, float max_walk_dist) {
     // this is called "R" in the paper. Initialized as identity
     mat3 transport_matrix = mat3(1.0);
 
+    // Secant curvature state: gradient and position one step back.
+    vec3 gradPos = cur_pos, prevGrad = gradient, prevGradPos = cur_pos;
+    bool haveSecant = false;
+
     for (int i = 0; i < MAX_STEPS; i++) {
         vec3 dir = seed.position - cur_pos;
         vec3 v = project_onto_tangentplane(dir, n);
@@ -211,25 +218,21 @@ LogMap compute_logmap(vec3 query_pt, Seed seed, float max_walk_dist) {
         }
         // normalize v
         v /= len_v;
-        // Local quadratic (curvature) coefficient of the geodesic (eq. 16):
-        //   alpha = -<v, H_f v> / ||grad f||. grad_len is reused from the previous
-        //   step's projection point (next_pos ~ step_tmp_pos), so we skip a second
-        //   gradient evaluation at cur_pos.
-        float curvature = hessian_three_point(cur_pos, v); // <v, H_f(x_i) v>
+        // <v, H_f v> from the two most recent gradients instead of the
+        // paper's 3-tap stencil (eq. 17) -- free, since the walk already
+        // computes a gradient per step. No history yet -> alpha = 0.
+        float curvature = 0.0;
+        if (haveSecant) {
+            float ds = distance(gradPos, prevGradPos);
+            if (ds > 1e-8) curvature = dot(gradient - prevGrad, v) / ds;
+        }
         float alpha = -curvature / grad_len;
         float alpha2 = alpha * alpha;
-
-        // Compute adaptive time step (sec 3.6.2, eq. 34).
-        // When the surface is flat (H_f = 0 => alpha = 0), we recover tau = s.
-        // dir == seed.position - cur_pos, so length(dir) is the distance to the seed.
         float s = length(dir) / float(MAX_STEPS - i);
-        float x = s * s * alpha2;
-        float tau;
-        if (alpha2 < 1e-12) {
-            tau = s;
-        } else {
-            tau = sqrt(2.0 * (x / (sqrt(1.0 + x) + 1.0)) / alpha2);
-        }
+        // Stable form of the paper's tau (see supplemental): the alpha^2
+        // cancels, so no cancellation and no division by a vanishing alpha^2.
+        // alpha -> 0 gives tau -> s automatically, no special case needed.
+        float tau = s * sqrt(2.0 / (sqrt(1.0 + s * s * alpha2) + 1.0));
         float tau2 = tau * tau;
 
         // One second-order geodesic step (eq. 16):
@@ -267,6 +270,11 @@ LogMap compute_logmap(vec3 query_pt, Seed seed, float max_walk_dist) {
         cur_pos = next_pos;
         n = n_next;
         grad_len = grad_next_len; // carry this point's gradient magnitude forward
+        prevGrad = gradient;
+        prevGradPos = gradPos;
+        gradient = grad_next;
+        gradPos = step_tmp_pos;
+        haveSecant = true;
     }
     float final_dist = distance(cur_pos, seed.position);
     if (final_dist < MIN_WALK_DIST) {
@@ -277,7 +285,7 @@ LogMap compute_logmap(vec3 query_pt, Seed seed, float max_walk_dist) {
         // i.e. opposite to the walk normals coming from calc_discrete_gradient. That makes
         // build_rotation_matrix(seed_normal, n) a ~180 deg rotation and blows up
         // the 1/(1+c) term -> NaN transport. The field normal is consistent with n.
-        vec3 seed_normal = calc_discrete_gradient(seed.position);
+        vec3 seed_normal = normalize(calc_discrete_gradient(seed.position));
         vec3 t = normalize(project_onto_tangentplane(prev_pos - seed.position, seed_normal));
         vec2 uv = accum_length * vec2(dot(t, seed.e1), dot(t, seed.e2));
         // mat3 trans = transport_matrix * build_rotation_matrix(n, seed_normal);
@@ -308,9 +316,28 @@ float get_weight(float d_x_pi, float d_x_pj, float d_pj_pi) {
     } else if (params.ImplicitUVsBlending < d_Vij) {
         return 0.0;
     } else {
+        // sec. 4.3.1 eq. 40
         return weighting_function(0.5 - d_Vij / (2.0 * params.ImplicitUVsBlending));
     }
 }
+
+float edge_weight(int from, int to) {
+    Neighbors neighs = get_neighbors(from);
+    for (int i = 0; i < neighs.count; ++i) {
+        if (int(neighs.neighbor_list[i].x) == to) {
+            return neighs.neighbor_list[i].y;
+        }
+    }
+    return -1.0;
+}
+
+struct BlendedUvResult {
+    LogMap logmap;
+    Seed logmap_seed;
+    bool has_decal;
+    LogMap decal;
+    Seed decal_seed;
+};
 
 // Algorithm 2 from the paper.
 // Collects the seeds from all objects, finds the geodesicly clostest seed and
@@ -319,44 +346,49 @@ LogMap compute_blended_uvs(vec3 pt) {
     // Collect seeds from all objects in the scene
     Seed all_seeds[TOTAL_NR_SEEDS];
     int current_seed_idx = 0;
+    float best_eucl_dist = 1e30;
+    int best_eucl_idx = -1;
     for (int obj_idx = 0; obj_idx < scene_data.num_scene_objects; obj_idx++) {
         Seed obj_seeds[NUM_SEEDS_PER_OBJ] = get_seeds(obj_idx);
         for (int s = 0; s < NUM_SEEDS_PER_OBJ; s++) {
-            all_seeds[current_seed_idx] = obj_seeds[s];
+            Seed seed = obj_seeds[s];
+            if (seed.enabled) {
+                float dist = distance(pt, seed.position);
+                if (dist < best_eucl_dist) {
+                    best_eucl_dist = dist;
+                    best_eucl_idx = current_seed_idx;
+                }
+            }
+            all_seeds[current_seed_idx] = seed;
             current_seed_idx++;
         }
     }
 
-    int sorted_indices[TOTAL_NR_SEEDS] = sort_seeds_by_eucl_distance(all_seeds, pt);
+    if (best_eucl_idx == -1) {
+        return LogMap(ERR_LOGMAP_OTHER, vec2(0.0), FLOAT_INF, mat3(1.0));
+    }
 
-    int best_idx = sorted_indices[0];
+    int best_idx = best_eucl_idx;
     // L* in the paper
-    LogMap best_logmap = compute_logmap(pt, all_seeds[best_idx], MAX_WALK_DIST);
+    LogMap best_logmap = compute_logmap(pt, all_seeds[best_idx], all_seeds[best_idx].max_walk_dist);
     // d*M in the paper
     float best_geo_dist = best_logmap.geodesic_dist;
 
-    for (int k = 1; k < TOTAL_NR_SEEDS; k++) {
-        int seed_idx = sorted_indices[k];
-        // Perfomance optimization: Skip all the inactive seeds at the end
-        if (!all_seeds[seed_idx].enabled) {
+    for (int seed_idx = 0; seed_idx < current_seed_idx; seed_idx++) {
+        if (seed_idx == best_eucl_idx || !all_seeds[seed_idx].enabled) {
             continue;
         }
 
         // a seed cant be geodescially closer if the eucl. distance is greater
         // than the current best geodesic distance (sec. 4.1, eq 35)
         if (distance(pt, all_seeds[seed_idx].position) <= best_geo_dist) {
-            LogMap l = compute_logmap(pt, all_seeds[seed_idx], best_geo_dist);
+            LogMap l = compute_logmap(pt, all_seeds[seed_idx], min(best_geo_dist, all_seeds[seed_idx].max_walk_dist));
             if (l.geodesic_dist < best_geo_dist) {
                 best_idx = seed_idx;
                 best_logmap = l;
                 best_geo_dist = l.geodesic_dist;
             }
         }
-    }
-
-    if (best_idx == -1) {
-        best_logmap.return_code = ERR_LOGMAP_MAX_DIST;
-        return best_logmap;
     }
 
     Seed pi = all_seeds[best_idx];
@@ -366,6 +398,7 @@ LogMap compute_blended_uvs(vec3 pt) {
         best_logmap.uv += pi.offset;
         return best_logmap;
     } else {
+        #ifdef USE_WEIGHTS_APPROX_FOR_BLEND
         // get the 2 logmaps, get weight bei calling get_weights(best_geo_dist, other_logmap.geo_dist, blend_weight)
         vec2 L = vec2(0.0);
         float wi = 1.0;
@@ -381,7 +414,7 @@ LogMap compute_blended_uvs(vec3 pt) {
 
             // test from sec. 4.3.3
             if (pow(best_geo_dist, 2.0) + 2.0 * params.ImplicitUVsBlending * d_ji >= pow(distance(pt, pj.position), 2.0)) {
-                LogMap Lj = compute_logmap(pt, pj, best_geo_dist + 2.0 * params.ImplicitUVsBlending);
+                LogMap Lj = compute_logmap(pt, pj, min(best_geo_dist + 2.0 * params.ImplicitUVsBlending, pj.max_walk_dist));
 
                 // w_i*j in the paper
                 float w_ij = get_weight(best_geo_dist, Lj.geodesic_dist, d_ji);
@@ -399,6 +432,88 @@ LogMap compute_blended_uvs(vec3 pt) {
         // following a suggestion from one of the authors
         best_logmap.uv = (L + wi * (best_logmap.uv + pi.offset)) / (W + wi);
         return best_logmap;
+
+        #else // USE_WEIGHTS_APPROX_FOR_BLEND
+
+        int neighA = -1;
+        int neighB = -1;
+        float distA = 0.0;
+        float distB = 0.0;
+        vec2 uvA = vec2(0.0);
+        vec2 uvB = vec2(0.0);
+
+        for (int i = 0; i < neighbors.count; i++) {
+            vec2 data = neighbors.neighbor_list[i];
+            int j = int(data.x);
+            Seed pj = get_seed(j);
+            // The papers says that we need weight from j to i
+            // but that should be the same as from i to j
+            float d_ji = data.y;
+
+            // test from sec. 4.3.3, eq. 44
+            if (pow(best_geo_dist, 2.0) + 2.0 * params.ImplicitUVsBlending * d_ji < pow(distance(pt, pj.position), 2.0)) continue;
+
+            LogMap Lj = compute_logmap(pt, pj, min(best_geo_dist + 2.0 * params.ImplicitUVsBlending, pj.max_walk_dist));
+
+            // Failed walk -> weight 0; a finite stand-in distance gives that
+            // without risking a NaN from squaring LogMap's 1e30 sentinel.
+            float dj = Lj.return_code == ERR_LOGMAP_OK ? Lj.geodesic_dist : (best_geo_dist + 2.0 * params.ImplicitUVsBlending + d_ji);
+            vec2 uj = Lj.uv + pj.offset;
+            if (neighA < 0) {
+                neighA = j;
+                distA = dj;
+                uvA = uj;
+            }
+            else if (neighB < 0) {
+                neighB = j;
+                distB = dj;
+                uvB = uj;
+            }
+            else if (dj < max(distA, distB)) { // keep the two nearest
+                if (distA > distB) {
+                    neighA = j;
+                    distA = dj;
+                    uvA = uj;
+                }
+                else {
+                    neighB = j;
+                    distB = dj;
+                    uvB = uj;
+                }
+            }
+        }
+
+        vec2 uvI = best_logmap.uv + pi.offset;
+        // nothing to blend with
+        if (neighA < 0) {
+            best_logmap.uv = uvI;
+            return best_logmap;
+        }
+
+        // eq. (38) over {best_logmap, neighA, neighB}; w_{a,b} = 1 - w_{b,a} holds exactly, so
+        // three weight evaluations cover all three seeds.
+        float w_IA = get_weight(best_geo_dist, distA, edge_weight(best_idx, neighA));
+        float wI = w_IA;
+        float wA = 1.0 - w_IA;
+        float wB = 0.0;
+        if (neighB >= 0) {
+            float w_IB = get_weight(best_geo_dist, distB, edge_weight(best_idx, neighB));
+            wI = min(wI, w_IB);
+            wB = 1.0 - w_IB;
+
+            float d_AB = edge_weight(neighA, neighB);
+            if (d_AB > 0.0) { // only if neighA and neighB are merged too
+                float w_AB = get_weight(distA, distB, d_AB);
+                wA = min(wA, w_AB);
+                wB = min(wB, 1.0 - w_AB);
+            }
+        }
+        // wI >= 1/2: `best_logmap` is the geodesic-nearest seed, so d_V(best_logmap, .) <= 0 for
+        // every neighbour and omega(1/2) = 1/2 keeps the denominator off zero.
+        best_logmap.uv = (wI * uvI + wA * uvA + wB * uvB) / (wI + wA + wB);
+        return best_logmap;
+
+        #endif // USE_WEIGHTS_APPROX_FOR_BLEND
     }
 }
 
@@ -414,6 +529,17 @@ vec3 project_point_to_surface(vec3 point) {
 // Calculates all the distances between seeds, sets them as edge weights
 // and uses the parallel transport matrix
 void precalculate_implicituvs() {
+    for (int seed_idx = 0; seed_idx < TOTAL_NR_SEEDS; seed_idx++) {
+        Seed seed = get_seed(seed_idx);
+        if (!seed.enabled) {
+            continue;
+        }
+        // Do a projection back onto the SDF surface, in case the seed is inside the surface
+        seed.position = project_point_to_surface(seed.position);
+        // Also write it back to the seeds buffer
+        seed_buffer.Seeds[seed_idx][0].xyz = seed.position;
+    }
+
     // according to 4.3.1 in the paper, the blending width is
     // 1/3 * min distance between seeds over all seeds
     float min_dist = 9999.0;
@@ -426,11 +552,6 @@ void precalculate_implicituvs() {
             continue;
         }
 
-        // Do a projection back onto the SDF surface, in case the seed is inside the surface
-        pi.position = project_point_to_surface(pi.position);
-        // Also write it back to the seeds buffer
-        seed_buffer.Seeds[seed][0].xyz = pi.position;
-
         for (int n = range_start; n < range_end; n++) {
             int neighbor = merging_graph.MergingGraphNeighbors[n];
             Seed pj = get_seed(neighbor);
@@ -438,13 +559,9 @@ void precalculate_implicituvs() {
                 continue;
             }
 
-            pj.position = project_point_to_surface(pj.position);
-            // Also write it back to the seeds buffer
-            seed_buffer.Seeds[neighbor][0].xyz = pj.position;
-
             // FIXME: why does the walk from the exact seed position go through the middle?
             // might be related to instability of normal or tangentplane projection
-            LogMap map_between_seeds = compute_logmap(pi.position + pi.e1 * 0.005, pj, MAX_WALK_DIST);
+            LogMap map_between_seeds = compute_logmap(pi.position + pi.e1 * 0.002, pj, pi.max_walk_dist);
 
             if (map_between_seeds.return_code == ERR_LOGMAP_OK) {
                 min_dist = min(min_dist, map_between_seeds.geodesic_dist);

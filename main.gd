@@ -2,17 +2,6 @@
 extends Node3D
 class_name MainScript
 
-@export_range(0.001, 30.0, 0.001) var GlobalBlendingFactor := 0.046:
-	set(v):
-		if v != GlobalBlendingFactor:
-			GlobalBlendingFactor = v
-			precalc_dirty = true
-# @export_range(0.0, 32.0, 0.001) var AlbedoBlendPower := 1.0
-@export_range(0.0, 1.0, 0.001) var AlbedoBlendOffset := 0.211
-@export_range(0.0, 1.0, 0.001) var ImplicitUVsBlending := 0.179
-@export var ColorTex: Texture2D
-@export_tool_button("Do a precalc!") var PrecalcButton = do_precalc
-@export var PrintPrecalcResults := false
 enum LogLevel {
 	LOG_ERROR = 0,
 	LOG_WARN = 1,
@@ -24,18 +13,57 @@ enum LogLevel {
 			Logging = v
 			LogLvl = v
 static var LogLvl := 0
-@export var VisualizeSeeds := false:
+@export_range(0.001, 30.0, 0.001) var GlobalBlendingFactor := 0.046:
+	set(v):
+		if v != GlobalBlendingFactor:
+			GlobalBlendingFactor = v
+			precalc_dirty = true
+# @export_range(0.0, 32.0, 0.001) var AlbedoBlendPower := 1.0
+@export_range(0.0, 1.0, 0.001) var AlbedoBlendOffset := 0.211
+@export var ColorTex: Texture2D
+@export_tool_button("Do a precalc!") var PrecalcButton = func(): build_scene(true)
+@export var PrintPrecalcResults := false
+@export_enum("No", "Visualize before precalc", "Visualize after precalc") var VisualizeSeeds := 0:
 	set(v):
 		if v != VisualizeSeeds:
 			VisualizeSeeds = v
 			if is_inside_tree():
 				visualize_seeds($Scene)
-@export var UpdateSeedsAfterPrecalc := false
 # Transform3D gets converted to mat4
 var scene_data: Array[Transform3D] = []
 var num_scene_objects := 0
-var seed_data: Array[Transform3D] = []
+
+class Seed:
+	var position: Vector3
+	var e1: Vector3
+	var e2: Vector3
+	var offset: Vector2
+	var enabled: bool
+	var max_walk_dist: float
+	
+	func _init(_position: Vector3, _e1: Vector3, _e2: Vector3, _max_walk: float, _enabled: bool = true) -> void:
+		self.position = _position
+		self.e1 = _e1
+		self.e2 = _e2
+		self.offset = Vector2.ZERO
+		self.enabled = _enabled
+		#if _max_walk == null:
+			#_max_walk = Def
+		self.max_walk_dist = _max_walk
+	
+	func printer() -> String:
+		return "Seed(" + str(self.position) + ", " + str(self.e1) + ", " + str(self.e2) + ", " + str(self.offset) + ", " + str(self.enabled) + ", " + str(self.max_walk_dist) + ")"
+	
+	func eq(other: Seed) -> bool:
+		return self.position.is_equal_approx(other.position) and self.e1.is_equal_approx(other.e1) and self.e2.is_equal_approx(other.e2) and self.enabled == other.enabled and is_equal_approx(self.max_walk_dist, other.max_walk_dist)
+	
+var seed_data: Array[Seed] = []
+# xyz = target direction (normalized, in tangent plane of seed), w = strength
+var seed_data_targets: Array[Vector4] = []
+# store how seed_data looked like right after scene_build because it changes after a precalculation
+var seed_data_after_scenebuild: Array[Seed] = []
 var merging_graph: MergingGraph
+var ImplicitUVsBlending := 0.179
 
 const COORDINATE_SYSTEM = preload("uid://bts105g652v5w")
 
@@ -47,16 +75,18 @@ const MAX_NUM_MERGE_NEIGHBORS := 16
 const TOTAL_NR_SEEDS := NUM_SEEDS_PER_OBJ * MAX_NUM_OBJECTS
 
 # compute shader stuff
+var started_first_real_scenebuild := false
 var ready_to_run := false
 var rd: RenderingDevice
 var rids: Dictionary[String, RID] = {}
 var non_freeing_rids: Dictionary[String, RID] = {}
 var viewport_size: Vector2 = Vector2.ZERO
 var DEFAULT_FORMAT: RDTextureFormat
+var DEPTH_FORMAT: RDTextureFormat
 var uniforms: Dictionary[String, RDUniform] = {}
 var rid_freeing_queue: Array[RID] = []
-func do_precalc():
-	build_scene(true)
+var output_texture: Texture2DRD
+var depth_texture: Texture2DRD
 
 enum PrecalculationStage {
 	PRECALC_FRAMES = 1,
@@ -66,8 +96,8 @@ enum PrecalculationStage {
 var PrecalcStage := PrecalculationStage.PRECALC_DONE
 var precalc_dirty := false
 
-const SIZE_VEC2 := 8
 # because of std430 layout, a mat3 is 3x (vec3 + 4 byte padding)
+const SIZE_VEC2 := 8
 const SIZE_MAT3 := 48
 const SIZE_MAT4 := 64
 var gdext := MyExtension.new()
@@ -76,6 +106,15 @@ const PRECALC_BUF_LOGMAPS_START := PRECALC_BUF_MATRICES_START + TOTAL_NR_SEEDS *
 const PRECALC_BUF_SIZE := PRECALC_BUF_LOGMAPS_START + TOTAL_NR_SEEDS * MAX_NUM_MERGE_NEIGHBORS * SIZE_VEC2
 
 func _ready() -> void:
+	var material := %RaymarcherTexShower.get_surface_override_material(0).duplicate() as ShaderMaterial
+	%RaymarcherTexShower.set_surface_override_material(0, material)
+
+	output_texture = Texture2DRD.new()
+	depth_texture = Texture2DRD.new()
+
+	material.set_shader_parameter("tex", output_texture)
+	material.set_shader_parameter("depth_tex", depth_texture)
+	
 	# do a first build of the scene so that at least theres some data there
 	# another build will be called inside of setup_compute_shader()
 	build_scene(true)
@@ -90,20 +129,55 @@ func _process(_delta: float) -> void:
 
 
 # =========================== COMPUTE SHADER STUFF ===========================
-func _notification(what):
-	if what == NOTIFICATION_PREDELETE:
-		for rid_key in rids:
-			var rid := rids[rid_key]
-			if rid.is_valid() and not rid_freeing_queue.has(rid):
-				rd.call_deferred("free_rid", rid)
-		for rid in rid_freeing_queue:
-			if rid.is_valid():
-				rd.call_deferred("free_rid", rid)
-		rid_freeing_queue.clear()
-		#RenderingServer.free_rid(rd)
+var shutting_down := false
+func _exit_tree() -> void:
+	shutting_down = true
+	ready_to_run = false
+	set_process(false)
+
+	if RenderingServer.frame_pre_draw.is_connected(run_compute_shader):
+		RenderingServer.frame_pre_draw.disconnect(run_compute_shader)
+
+	var owned_rids: Array[RID] = []
+	for rid: RID in rids.values():
+		if rid.is_valid() and not owned_rids.has(rid):
+			owned_rids.append(rid)
+	for rid: RID in rid_freeing_queue:
+		if rid.is_valid() and not owned_rids.has(rid):
+			owned_rids.append(rid)
+	rids.clear()
+	rid_freeing_queue.clear()
+	non_freeing_rids.clear()
+
+	if rd == null:
+		return
+
+	RenderingServer.call_on_render_thread(
+		_release_compute_resources.bind(
+			rd,
+			owned_rids,
+			output_texture,
+			depth_texture
+		)
+	)
+
+static func _release_compute_resources(
+	device: RenderingDevice,
+	owned_rids: Array[RID],
+	color_tex: Texture2DRD,
+	depth_tex: Texture2DRD
+) -> void:
+	if color_tex != null:
+		color_tex.texture_rd_rid = RID()
+	if depth_tex != null:
+		depth_tex.texture_rd_rid = RID()
+	for rid in owned_rids:
+		device.free_rid(rid)
 
 
 func setup_compute_shader():
+	if shutting_down:
+		return
 	rd = RenderingServer.get_rendering_device()
 
 	if Engine.is_editor_hint():
@@ -111,8 +185,8 @@ func setup_compute_shader():
 	else:
 		viewport_size = get_viewport().get_visible_rect().size
 
-	DEFAULT_FORMAT = new_texture_format(
-		RenderingDevice.DataFormat.DATA_FORMAT_R32G32B32A32_SFLOAT)
+	DEFAULT_FORMAT = new_texture_format(RenderingDevice.DataFormat.DATA_FORMAT_R32G32B32A32_SFLOAT)
+	DEPTH_FORMAT = new_texture_format(RenderingDevice.DataFormat.DATA_FORMAT_R32_SFLOAT)
 
 	if Engine.is_editor_hint():
 		viewport_size = Engine.get_singleton("EditorInterface").get_editor_viewport_3d().get_visible_rect().size
@@ -135,18 +209,13 @@ func setup_compute_shader():
 	lin.mip_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
 	rids["linear_sampler"] = rd.sampler_create(lin)
 
-	uniforms["output_img"] = create_output_image(DEFAULT_FORMAT, 0)
+	uniforms["output_img"] = create_output_image(DEFAULT_FORMAT, 0, "output_img")
+	uniforms["depth_img"] = create_output_image(DEPTH_FORMAT, 5, "depth_img")
 	uniforms["scene_data"] = create_scenedata_buffer(1)
 	uniforms["camera_data"] = create_camera_data(2)
-	uniforms["color_texture"] = texture_uniform(
-		RenderingServer.texture_get_rd_texture(ColorTex.get_rid()), DEFAULT_FORMAT, 4)
+	texture_uniform(RenderingServer.texture_get_rd_texture(ColorTex.get_rid()), DEFAULT_FORMAT, 4, "color_texture")
 	
-	non_freeing_rids["uniform_set_0"] = create_uniform_set([
-		uniforms["output_img"],
-		uniforms["scene_data"],
-		uniforms["camera_data"],
-		uniforms["color_texture"]
-	], 0)
+	create_uniform_set0()
 
 	var seed_buffer_uni = create_seed_buffer(0)
 	var merging_graph_uni = create_merging_graph_buffer(1)
@@ -156,12 +225,14 @@ func setup_compute_shader():
 		merging_graph_uni,
 		precalc_buffer_uni
 	], 1)
-	ready_to_run = true
+	seed_data.resize(TOTAL_NR_SEEDS)
+	
 	build_scene(true)
+	ready_to_run = true
 
 
 func run_compute_shader():
-	if !ready_to_run:
+	if not ready_to_run or shutting_down:
 		return
 	#region other run stuff
 	var new_viewport_size: Vector2
@@ -173,14 +244,16 @@ func run_compute_shader():
 	viewport_size = new_viewport_size
 	DEFAULT_FORMAT.width = int(viewport_size.x)
 	DEFAULT_FORMAT.height = int(viewport_size.y)
+	DEPTH_FORMAT.width = int(viewport_size.x)
+	DEPTH_FORMAT.height = int(viewport_size.y)
 	if recreate_output:
-		recreate_output_image(DEFAULT_FORMAT)
+		recreate_output_images()
 	var camera: Camera3D
 	if Engine.is_editor_hint():
 		camera = Engine.get_singleton("EditorInterface").get_editor_viewport_3d().get_camera_3d()
 	else:
 		camera = get_viewport().get_camera_3d()
-	update_camera_data()
+	update_camera_data(camera)
 
 	var push_constant = _create_push_constant([
 		viewport_size,
@@ -216,14 +289,12 @@ func run_compute_shader():
 	if rids_freed == rid_freeing_queue.size():
 		rid_freeing_queue.clear()
 
-	if %RaymarcherTexShower.get_surface_override_material(0).get_shader_parameter("tex") is not Texture2DRD:
-		var tex := Texture2DRD.new()
-		tex.texture.texture_rd_rid = uniforms["output_img"].get_ids()[0]
-		%RaymarcherTexShower.get_surface_override_material(0).set_shader_parameter("tex", tex)
-	else:
-		var tex: Texture2DRD = %RaymarcherTexShower.get_surface_override_material(0).get_shader_parameter("tex")
-		tex.texture_rd_rid = uniforms["output_img"].get_ids()[0]
-		%RaymarcherTexShower.get_surface_override_material(0).set_shader_parameter("tex", tex)
+	var output_rid: RID = rids["output_img"]
+	var depth_rid: RID = rids["depth_img"]
+	if output_texture.texture_rd_rid != output_rid:
+		output_texture.texture_rd_rid = output_rid
+	if depth_texture.texture_rd_rid != depth_rid:
+		depth_texture.texture_rd_rid = depth_rid
 
 
 #region Precalc stuff
@@ -233,6 +304,7 @@ func run_precalc():
 		return
 	precalc_dirty = false
 	PrecalcStage = PrecalculationStage.PRECALC_FRAMES
+	update_seed_buffer()
 	while PrecalcStage != PrecalculationStage.PRECALC_DONE:
 		run_compute_shader()
 
@@ -278,17 +350,19 @@ func precalc_read_and_apply_merging_graph_weights():
 		@warning_ignore("integer_division")
 		merging_graph.weights[i / 4] = weight
 
+
+
 func precalc_apply_seed_pos_projections():
 	var seed_buf := rd.buffer_get_data(rids["seed_buffer"])
 	for i in range(0, seed_buf.size(), SIZE_MAT4):
 		@warning_ignore("integer_division")
 		var seed_idx := i / SIZE_MAT4
 		# if seed is not active, skip
-		if not bool(seed_data[seed_idx].origin.z):
+		if not seed_data[seed_idx].enabled:
 			continue
 		var seed_pos := Vector3(seed_buf.decode_float(i + 0), seed_buf.decode_float(i + 4), seed_buf.decode_float(i + 8))
 		if seed_pos.is_finite():
-			seed_data[seed_idx].basis.x = seed_pos
+			seed_data[seed_idx].position = seed_pos
 
 
 func handle_precalculation():
@@ -303,11 +377,11 @@ func handle_precalculation():
 	var is_valid := true
 	if PrecalcStage == PrecalculationStage.PRECALC_FRAMES:
 		next_precalc_stage = PrecalculationStage.PRECALC_OFFSETS
-		
+
 		precalc_apply_seed_pos_projections()
-		
 		var matrices := precalc_read_precalc_buffer_matrices()
-		var reference_seed_basis := seed_data[0].basis.y # e1 of first seed (e2 would be basis.z)
+		var use_e1_as_ref := false
+		var reference_seed_basis := seed_data[0].e1 if use_e1_as_ref else seed_data[0].e2
 		var res := gdext.optimize_frames(merging_graph.offsets, merging_graph.neighbors, merging_graph.weights, matrices, reference_seed_basis)
 		
 		for ti in res:
@@ -316,23 +390,23 @@ func handle_precalculation():
 				break
 		
 		if is_valid:
-			log_info("Frames optimization result:")
+			if PrintPrecalcResults: log_info("Frames optimization result:")
 			var seed_idx := 0
 			for ti in res:
 				# if seed not active: skip
-				if not bool(seed_data[seed_idx].origin.z):
+				if not seed_data[seed_idx].enabled:
 					seed_idx += 1
 					continue
 				
-				log_info("seed: " + str(seed_idx), "ti: " + str(ti))
+				if PrintPrecalcResults: log_info("seed: " + str(seed_idx), "ti: " + str(ti))
 				if ti == Vector3.ZERO:
-					log_info("    ti should not be zero! Skipping...")
+					if PrintPrecalcResults: log_info("    ti should not be zero! Skipping...")
 					seed_idx += 1
 					continue
 				
-				var seed_pos := seed_data[seed_idx].basis.x
-				var e1 := seed_data[seed_idx].basis.y
-				var e2 := seed_data[seed_idx].basis.z
+				var seed_pos := seed_data[seed_idx].position
+				var e1 := seed_data[seed_idx].e1
+				var e2 := seed_data[seed_idx].e2
 				
 				@warning_ignore("integer_division")
 				# object index of that seed
@@ -343,13 +417,16 @@ func handle_precalculation():
 				if n.dot(pos_to_seed) < 0.0:
 					n = e2.cross(e1)
 				var ti_proj := project_onto_tangentplane(ti, n).normalized()
-				if UpdateSeedsAfterPrecalc:
-					seed_data[seed_idx].basis.y = ti_proj
+				if use_e1_as_ref:
+					seed_data[seed_idx].e1 = ti_proj
 					# e2 = n x e1 (sec. 4.4)
-					seed_data[seed_idx].basis.z = n.cross(ti_proj)
+					seed_data[seed_idx].e2 = n.cross(ti_proj)
+				else:
+					seed_data[seed_idx].e2 = ti_proj
+					seed_data[seed_idx].e1 = (-n).cross(ti_proj)
 				
 				seed_idx += 1
-			log_info()
+			if PrintPrecalcResults: log_info()
 		
 	elif PrecalcStage == PrecalculationStage.PRECALC_OFFSETS:
 		next_precalc_stage = PrecalculationStage.PRECALC_DONE
@@ -363,19 +440,19 @@ func handle_precalculation():
 				break
 		
 		if is_valid:
-			log_info("Offsets optimization result:")
+			if PrintPrecalcResults: log_info("Offsets optimization result:")
 			var seed_idx := 0
 			for off in res:
 				# if seed not active: skip
-				if not bool(seed_data[seed_idx].origin.z):
+				if not seed_data[seed_idx].enabled:
 					seed_idx += 1
 					continue
 				
-				log_info("seed: " + str(seed_idx), "offset: " + str(off))
-				seed_data[seed_idx].origin.x = off.x
-				seed_data[seed_idx].origin.y = off.y
+				if PrintPrecalcResults: log_info("seed: " + str(seed_idx), "offset: " + str(off))
+				seed_data[seed_idx].offset = off
+				
 				seed_idx += 1
-			log_info()
+			if PrintPrecalcResults: log_info()
 		
 			var has_defect := false
 			for i in range(TOTAL_NR_SEEDS):
@@ -388,7 +465,7 @@ func handle_precalculation():
 					var offset_j := res[neigh]
 					has_defect = has_defect or logmap_pi_pj.dot(offset_i - offset_j) < 0.0
 			if has_defect:
-				log_warn("Detected defect in global UV")
+				log_info("Detected defect in global UV")
 	
 	if is_valid:
 		# no matter the precalc stage, we always want to update the seed buffer
@@ -399,8 +476,7 @@ func handle_precalculation():
 	PrecalcStage = next_precalc_stage
 	if PrecalcStage == PrecalculationStage.PRECALC_DONE:
 		ImplicitUVsBlending = precalc_read_precalc_buffer_blendwidth()
-		if UpdateSeedsAfterPrecalc:
-			visualize_seeds($Scene)
+		visualize_seeds($Scene)
 
 
 func project_onto_tangentplane(dir: Vector3, n: Vector3) -> Vector3:
@@ -424,13 +500,37 @@ func get_view_matrix_data(camera: Camera3D) -> PackedFloat32Array:
 	])
 
 
-func get_inv_projection_matrix_data(camera: Camera3D) -> PackedFloat32Array:
-	var proj := camera.get_camera_projection().inverse()
+func get_inv_projection_matrix_data(
+	camera: Camera3D,
+	render_size: Vector2
+) -> PackedFloat32Array:
+	var aspect := render_size.x / render_size.y
+	var keep_width := camera.keep_aspect == Camera3D.KEEP_WIDTH
+	var projection := Projection()
+
+	match camera.projection:
+		Camera3D.PROJECTION_PERSPECTIVE:
+			projection = Projection.create_perspective(
+				camera.fov, aspect,
+				camera.near, camera.far, keep_width
+			)
+		Camera3D.PROJECTION_ORTHOGONAL:
+			projection = Projection.create_orthogonal_aspect(
+				camera.size, aspect,
+				camera.near, camera.far, keep_width
+			)
+		Camera3D.PROJECTION_FRUSTUM:
+			projection = Projection.create_frustum_aspect(
+				camera.size, aspect, camera.frustum_offset,
+				camera.near, camera.far, keep_width
+			)
+
+	var inv := projection.inverse()
 	return PackedFloat32Array([
-		proj.x.x, proj.x.y, proj.x.z, proj.x.w,
-		proj.y.x, proj.y.y, proj.y.z, proj.y.w,
-		proj.z.x, proj.z.y, proj.z.z, proj.z.w,
-		proj.w.x, proj.w.y, proj.w.z, proj.w.w,
+		inv.x.x, inv.x.y, inv.x.z, inv.x.w,
+		inv.y.x, inv.y.y, inv.y.z, inv.y.w,
+		inv.z.x, inv.z.y, inv.z.z, inv.z.w,
+		inv.w.x, inv.w.y, inv.w.z, inv.w.w,
 	])
 
 
@@ -440,7 +540,7 @@ func create_camera_data(binding: int) -> RDUniform:
 		camera = Engine.get_singleton("EditorInterface").get_editor_viewport_3d().get_camera_3d()
 	else:
 		camera = get_viewport().get_camera_3d()
-	var inv_proj_data := get_inv_projection_matrix_data(camera).to_byte_array()
+	var inv_proj_data := get_inv_projection_matrix_data(camera, viewport_size).to_byte_array()
 	var view_data := get_view_matrix_data(camera).to_byte_array()
 	var data := PackedByteArray()
 	data.append_array(inv_proj_data)
@@ -453,13 +553,10 @@ func create_camera_data(binding: int) -> RDUniform:
 	return uni
 
 
-func update_camera_data():
-	var camera: Camera3D
-	if Engine.is_editor_hint():
-		camera = Engine.get_singleton("EditorInterface").get_editor_viewport_3d().get_camera_3d()
-	else:
-		camera = get_viewport().get_camera_3d()
-	var inv_proj_data := get_inv_projection_matrix_data(camera).to_byte_array()
+func update_camera_data(camera: Camera3D):
+	if viewport_size.x <= 0 or viewport_size.y <= 0:
+		return
+	var inv_proj_data := get_inv_projection_matrix_data(camera, viewport_size).to_byte_array()
 	var view_data := get_view_matrix_data(camera).to_byte_array()
 	var data := PackedByteArray()
 	data.append_array(inv_proj_data)
@@ -491,28 +588,6 @@ func get_scenedata_data() -> PackedByteArray:
 	return bytes
 
 
-func create_seed_buffer(binding: int) -> RDUniform:
-	var data := get_seed_data()
-	rids["seed_buffer"] = rd.storage_buffer_create(data.size(), data)
-	var uni := RDUniform.new()
-	uni.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
-	uni.binding = binding
-	uni.add_id(rids["seed_buffer"])
-	return uni
-
-
-func update_seed_buffer():
-	var data := get_seed_data()
-	rd.buffer_update(rids["seed_buffer"], 0, data.size(), data)
-
-
-func get_seed_data() -> PackedByteArray:
-	var bytes := PackedByteArray()
-	for trans in seed_data:
-		bytes.append_array(encode_transform(trans))
-	return bytes
-
-
 func encode_transform(trans: Transform3D) -> PackedByteArray:
 	return PackedFloat32Array([
 		# column 0
@@ -524,6 +599,48 @@ func encode_transform(trans: Transform3D) -> PackedByteArray:
 		# column 3
 		trans.origin.x, trans.origin.y, trans.origin.z, 1.0
 	]).to_byte_array()
+
+
+
+func create_seed_buffer(binding: int) -> RDUniform:
+	var data := get_seed_data()
+	rids["seed_buffer"] = rd.storage_buffer_create(data.size(), data)
+	var uni := RDUniform.new()
+	uni.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+	uni.binding = binding
+	uni.add_id(rids["seed_buffer"])
+	return uni
+
+
+func update_seed_buffer():
+	if not rids.has("seed_buffer"):
+		push_warning("Seed buffer not found in rids Dictionary?!")
+		return
+	var data := get_seed_data()
+	rd.buffer_update(rids["seed_buffer"], 0, data.size(), data)
+
+
+func get_seed_data() -> PackedByteArray:
+	var bytes := PackedByteArray()
+	@warning_ignore("shadowed_global_identifier")
+	for seed in seed_data:
+		bytes.append_array(encode_seed(seed))
+	return bytes
+
+@warning_ignore("shadowed_global_identifier")
+func encode_seed(seed: Seed) -> PackedByteArray:
+	return PackedFloat32Array([
+		# column 0
+		seed.position.x, seed.position.y, seed.position.z, 0.0,
+		# column 1
+		seed.e1.x, seed.e1.y, seed.e1.z, 0.0,
+		# column 2
+		seed.e2.x, seed.e2.y, seed.e2.z, 0.0,
+		# column 3
+		seed.offset.x, seed.offset.y, float(seed.enabled), seed.max_walk_dist
+	]).to_byte_array()
+
+
 
 
 func create_merging_graph_buffer(binding: int) -> RDUniform:
@@ -585,10 +702,10 @@ func create_precalc_buffer(binding: int) -> RDUniform:
 
 
 # Creates a new image on the RD and returns its uniform
-func create_output_image(format: RDTextureFormat, binding: int) -> RDUniform:
+func create_output_image(format: RDTextureFormat, binding: int, imgname: StringName) -> RDUniform:
 	var image_rid = rd.texture_create(format, RDTextureView.new())
 	rd.texture_clear(image_rid, Color(0.0, 0.0, 0.0, 0), 0, 1, 0, 1)
-	rids["output_image"] = image_rid
+	rids[imgname] = image_rid
 	var image_uni := RDUniform.new()
 	image_uni.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
 	image_uni.binding = binding
@@ -596,18 +713,35 @@ func create_output_image(format: RDTextureFormat, binding: int) -> RDUniform:
 	return image_uni
 
 
-func recreate_output_image(format: RDTextureFormat):
-	if rids.has("output_image"):
-		rid_freeing_queue.append(rids["output_image"])
+func recreate_output_images():
+	if rids.has("output_img"):
+		rid_freeing_queue.append(rids["output_img"])
+	if rids.has("depth_img"):
+		rid_freeing_queue.append(rids["depth_img"])
 
-	var image_rid = rd.texture_create(format, RDTextureView.new())
+	var image_rid = rd.texture_create(DEFAULT_FORMAT, RDTextureView.new())
 	rd.texture_clear(image_rid, Color(0.0, 0.0, 0.0, 0), 0, 1, 0, 1)
-	rids["output_image"] = image_rid
+	rids["output_img"] = image_rid
 	uniforms["output_img"].clear_ids()
 	uniforms["output_img"].add_id(image_rid)
 	
+	var depth_image_rid = rd.texture_create(DEPTH_FORMAT, RDTextureView.new())
+	rd.texture_clear(depth_image_rid, Color(0.0, 0.0, 0.0, 0), 0, 1, 0, 1)
+	rids["depth_img"] = depth_image_rid
+	uniforms["depth_img"].clear_ids()
+	uniforms["depth_img"].add_id(depth_image_rid)
+	
+	create_uniform_set0()
+
+
+func create_uniform_set0():
+	if non_freeing_rids.has("uniform_set_0"):
+		var old_set: RID = non_freeing_rids["uniform_set_0"]
+		if rd.uniform_set_is_valid(old_set):
+			rd.free_rid(old_set)
 	non_freeing_rids["uniform_set_0"] = create_uniform_set([
 		uniforms["output_img"],
+		uniforms["depth_img"],
 		uniforms["scene_data"],
 		uniforms["camera_data"],
 		uniforms["color_texture"]
@@ -615,17 +749,21 @@ func recreate_output_image(format: RDTextureFormat):
 
 
 # Creates a texture on the RD with a sampler and returns its uniform
-func texture_uniform(texture_rid, format: RDTextureFormat, binding: int) -> RDUniform:
-	var input_tex_uniform := RDUniform.new()
-	input_tex_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
-	input_tex_uniform.binding = binding
+func texture_uniform(texture_rid, format: RDTextureFormat, binding: int, uname: StringName):
+	if rids.has("texture" + "_" + uname):
+		rd.free_rid(rids["texture" + "_" + uname])
+		rids.erase("texture" + "_" + uname)
+	var uniform := RDUniform.new()
+	uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	uniform.binding = binding
 	if texture_rid == null:
 		texture_rid = rd.texture_create(format, RDTextureView.new())
-		rids["texture" + str(binding) + "_" + str(format.format)] = texture_rid
+		rids["texture" + "_" + uname] = texture_rid
 		rd.texture_clear(texture_rid, Color(0.0, 0.0, 0.0, 0), 0, 1, 0, 1)
-	input_tex_uniform.add_id(rids["linear_sampler"])
-	input_tex_uniform.add_id(texture_rid)
-	return input_tex_uniform
+	uniform.add_id(rids["linear_sampler"])
+	uniform.add_id(texture_rid)
+	
+	uniforms[uname] = uniform
 
 
 func create_uniform_set(uniform_list: Array[RDUniform], set_binding: int) -> RID:
@@ -718,223 +856,281 @@ func _create_push_constant(values: Array[Variant]) -> PackedByteArray:
 
 # =========================== BUILDING THE SCENE ===========================
 func build_scene(force_update: bool=false):
+	if !is_inside_tree():
+		return
+	var node_to_seedidx_mapping: Dictionary[ImplicitUVsSeed, int] = {}
+	# we only collect the link nodes in the collect_scene_data function and then
+	# use the node_to_seedidx_mapping to build the merging graph
+	var seed_links: Array[ImplicitUVsLink] = []
+	
 	var new_num_objects := 0
 	var new_scene_data: Array[Transform3D]
 	new_scene_data.resize(MAX_NUM_OBJECTS * NUM_MATRICES_PER_OBJ)
-	var new_seed_data: Array[Transform3D]
+	var new_seed_data: Array[Seed]
 	new_seed_data.resize(TOTAL_NR_SEEDS)
+	seed_data.resize(TOTAL_NR_SEEDS)
+	new_num_objects = collect_scene_data($Scene, new_num_objects, new_scene_data, new_seed_data, node_to_seedidx_mapping, seed_links)
+	
 	var new_graph := MergingGraph.new()
-	new_num_objects = collect_scene_data($Scene, new_num_objects, new_scene_data, new_seed_data, new_graph)
+	for link in seed_links:
+		if not is_instance_valid(link.SeedA) or not is_instance_valid(link.SeedB):
+			continue
+		if node_to_seedidx_mapping.has(link.SeedA) and node_to_seedidx_mapping.has(link.SeedB):
+			var a_idx := node_to_seedidx_mapping[link.SeedA]
+			var b_idx := node_to_seedidx_mapping[link.SeedB]
+			
+			if not new_seed_data[a_idx].enabled:
+				log_warn("Seed A of link '", link.name, "' is not enabled!")
+				continue
+			if not new_seed_data[b_idx].enabled:
+				log_warn("Seed B of link '", link.name, "' is not enabled!")
+				continue
+			new_graph.insert_edge(a_idx, b_idx)
+	
+	# in collect_scene_data, we only make sure that each object has NUM_SEEDS_PER_OBJ seeds, but dont assure
+	# that there is TOTAL_NR_SEEDS (for example if there arent enough objects)
+	var num_seeds_left = TOTAL_NR_SEEDS - new_num_objects * NUM_SEEDS_PER_OBJ
+	for i in range(TOTAL_NR_SEEDS - num_seeds_left, TOTAL_NR_SEEDS):
+		new_seed_data[i] = inactive_seed()
+	
+	if force_update or \
+		new_num_objects != num_scene_objects or \
+		new_scene_data != scene_data or \
+		not seed_arrays_eq(new_seed_data, seed_data_after_scenebuild) or \
+		not new_graph.eq(merging_graph):
 
-	if force_update or new_num_objects != num_scene_objects or new_scene_data != scene_data:
 		log_info("Rebuilt scene")
 		num_scene_objects = new_num_objects
 		scene_data = new_scene_data
-		seed_data = new_seed_data
+		if ready_to_run:
+			update_scenedata_buffer()
+		# we need to do this in order to copy it
+		for i in range(TOTAL_NR_SEEDS):
+			var s: Seed = new_seed_data[i]
+			seed_data[i] = Seed.new(s.position, s.e1, s.e2, s.max_walk_dist, s.enabled)
+		seed_data_after_scenebuild = new_seed_data
 		merging_graph = new_graph
 		merging_graph.build()
 		visualize_seeds($Scene)
 		run_precalc()
 
 
-const MERGE_ALL_SEEDS_ON_SAME_OBJECT := false
-const MERGE_ALL_SEEDS_BETWEEN_OBJECTS := false
-const PRINT_SEED_CONNECTIONS := true
-func collect_scene_data(parent: Node, num_objects: int, new_scene_data: Array[Transform3D], new_seed_data: Array[Transform3D], graph: MergingGraph) -> int:
+func collect_scene_data(
+	parent: Node,
+	num_sdfs: int,
+	new_scene_data: Array[Transform3D],
+	new_seed_data: Array[Seed],
+	node_to_seedidx_mapping: Dictionary[ImplicitUVsSeed, int],
+	seed_links: Array[ImplicitUVsLink]) -> int:
+	if num_sdfs > MAX_NUM_OBJECTS:
+		log_warn("Maximum number of objects reached!")
+		return num_sdfs
+	if parent is CoordinateSystem:
+		return num_sdfs
 	for node in parent.get_children():
-		if not node.is_visible_in_tree():
+		if not node or (node.has_method("is_visible_in_tree") and not node.is_visible_in_tree()):
 			continue
-		var meshinst = node as SDFMesh
-		if !meshinst and node.get_child_count() > 0:
-			num_objects += collect_scene_data(node, num_objects,
-											  new_scene_data, new_seed_data, graph)
+
+		if node is not SDFMesh and node.get_child_count() > 0:
+			num_sdfs = collect_scene_data(node, num_sdfs, new_scene_data, new_seed_data, node_to_seedidx_mapping, seed_links)
+			continue
+		
+		if node is ImplicitUVsLink and node.Enabled:
+			seed_links.append(node)
+			continue
+		if node is ImplicitUVsSeed: # this gets handled by the SDFMeshes children loop below
+			continue
+		
+		var meshinst = node as SDFMesh # no need to check, as this will always apply
+		if not meshinst:
 			continue
 		var m: Mesh = meshinst.mesh
-		var sdf_mode := int(meshinst.Mode)
-		var blending_factor: float = meshinst.BlendingFactor
-		# Used to transform the 3D sampling position in world space back to SDF local space
-		var inverse_transform: Transform3D = meshinst.global_transform.affine_inverse()
-		var trans: Transform3D = meshinst.global_transform
-
+	
+		var seeds: Array[Seed] = []
+		var seed_targets: Array[Vector4] = []
+		var seed_nodes: Array[ImplicitUVsSeed] = []
+		# process all the seeds of this SDF mesh
+		for child in meshinst.get_children():
+			@warning_ignore("shadowed_global_identifier")
+			var seed = child as ImplicitUVsSeed
+			if not seed:
+				continue
+			if not seed.Enabled:
+				seed_nodes.append(seed)
+				continue
+			seed_nodes.append(seed)
+			var e1: Vector3 = seed.global_basis.x.normalized()
+			var e2: Vector3 = seed.global_basis.z.normalized()
+			seeds.append( Seed.new(seed.global_position, e1, e2, seed.MaxWalkDist, seed.Enabled) )
+		
 		var mesh_type := 0
 		var mesh_data := Vector3.ZERO
-		var seeds := Array()
-
 		if m is SphereMesh:
 			mesh_type = 1
 			mesh_data = Vector3(m.radius, 0.0, 0.0)
-			seeds.append(create_seed(Vector3(0.0, 0.0, m.radius), Vector3(
-				-1.0, 0.0, 0.0), Vector3(0.0, 1.0, 0.0), Vector2.ZERO))
-			seeds.append(create_seed(Vector3(0.0, 0.0, -m.radius),
-						 Vector3(1.0, 0.0, 0.0), Vector3(0.0, 1.0, 0.0), Vector2.ZERO))
-			graph.insert_edge(0, 1)
-			graph.insert_edge(1, 0)
 		elif m is BoxMesh:
 			mesh_type = 2
 			mesh_data = Vector3(m.size.x, m.size.y, m.size.z) * 0.5
-			## two seeds in the diagonal corners
-			#seeds.append(create_seed(Vector3(-mesh_data.x * 0.75, mesh_data.y, -mesh_data.z * 0.75),
-						 #Vector3(1.0, 0.0, 0.0), Vector3(0.0, 0.0, 1.0), Vector2.ZERO))
-			#seeds.append(create_seed(Vector3(mesh_data.x * 0.75, mesh_data.y, mesh_data.z * 0.75),
-						 #Vector3(-1.0, 0.0, 0.0), Vector3(0.0, 0.0, -1.0), Vector2.ZERO))
-			
-			
-			
-			## triple seed:
-			seeds.append(create_seed(Vector3(-mesh_data.x * 0.75, mesh_data.y, -mesh_data.z * 0.75),
-						 Vector3(1.0, 0.0, 0.0), Vector3(0.0, 0.0, 1.0), Vector2.ZERO))
-			seeds.append(create_seed(Vector3(-mesh_data.x * 0.75, mesh_data.y, mesh_data.z * 0.75),
-						 Vector3(-1.0, 0.0, 0.0), Vector3(0.0, 0.0, -1.0), Vector2.ZERO))
-			seeds.append(create_seed(Vector3(mesh_data.x * 0.75, mesh_data.y, 0.0),
-						 Vector3(-1.0, 0.0, 0.0), Vector3(0.0, 0.0, -1.0), Vector2.ZERO))
-						
-			
-			# On a plane, merge all the seeds
-			graph.insert_edge(0, 1)
-			graph.insert_edge(1, 2)
-			graph.insert_edge(2, 0)
-			## two seeds in the middle
-			#seeds.append(create_seed(Vector3(-mesh_data.x * 0.95, mesh_data.y, 0.0),
-						 #Vector3(-1.0, 0.0, 0.0), Vector3(0.0, 0.0, 1.0), Vector2.ZERO))
-			#seeds.append(create_seed(Vector3(mesh_data.x * 0.95, mesh_data.y, 0.0),
-						 #Vector3(1.0, 0.0, 0.0), Vector3(0.0, 0.0, -1.0), Vector2.ZERO))
-			
-			## testing with a slightly rotated basis: (it should optimize the frames to rotate it back)
-			#seeds.append(create_seed(Vector3(mesh_data.x * 0.75, mesh_data.y, mesh_data.z * 0.75),
-						 #Vector3(0.262, 0.0, 0.201).normalized(), Vector3(-0.201, 0.0, 0.262).normalized(), Vector2.ZERO))
 		elif m is CylinderMesh:
 			mesh_type = 3
-			mesh_data = Vector3(m.top_radius, m.bottom_radius, m.height * 0.5)
-			var middle_radius = (m.top_radius + m.bottom_radius) / 2.0
+			mesh_data = Vector3(m.top_radius, m.bottom_radius, m.height)
 
-			const seeds_on_cyl := 3
-			for i in range(seeds_on_cyl):
-				var angle := i * (2.0 * PI / seeds_on_cyl)
-				var pos_x: float = middle_radius * sin(angle)
-				var pos_z: float = middle_radius * cos(angle)
-				var tangent_x = cos(angle)
-				var tangent_z = -sin(angle)
-				seeds.append(create_seed(Vector3(pos_x, 0.0, pos_z), Vector3(
-					tangent_x, 0.0, tangent_z), Vector3(0.0, 1.0, 0.0), Vector2.ZERO))
-				
-				# Merge: A -> B, B -> C (but not C -> A as that'd be a cycle)
-				graph.insert_edge(0, 1)
-				graph.insert_edge(1, 2)
-		
 		elif m is TorusMesh:
 			mesh_type = 4
 			mesh_data = Vector3(m.outer_radius, m.inner_radius, 0.0)
-			var major_radius: float = (m.outer_radius + m.inner_radius) / 2.0
-			var minor_radius:  float = abs(m.inner_radius - m.outer_radius) / 2.0
-			seeds.append(create_seed(Vector3(0.0, minor_radius, major_radius), Vector3(
-				1.0, 0.0, 0.0), Vector3(0.0, 0.0, -1.0), Vector2.ZERO))
-			#seeds.append(create_seed(Vector3(0.0, -minor_radius, -major_radius),
-						 #Vector3(1.0, 0.0, 0.0), Vector3(0.0, 0.0, -1.0), Vector2.ZERO))
-			seeds.append(create_seed(Vector3(0.0, minor_radius, -major_radius),
-						 Vector3(1.0, 0.0, 0.0), Vector3(0.0, 0.0, -1.0), Vector2.ZERO))
-			
-			graph.insert_edge(0, 1)
-			graph.insert_edge(1, 0)
 
 		assert (seeds.size() <= NUM_SEEDS_PER_OBJ)
 		
-		
-		# Transform the seeds from object-local to world space using the nodes transform
-		for i in range(seeds.size()):
-			var t: Transform3D = seeds[i]
-			# transform the local space position into global space using the objects transform
-			# directions are transformed using only the basis, so transform origins dont affect them
-			seeds[i] = create_seed(trans * t.basis.x, trans.basis * t.basis.y, trans.basis *
-								   t.basis.z, Vector2(t.origin.x, t.origin.y), bool(t.origin.z))
-
-
 		# fill seeds with inactive seeds (in case we didnt use up 
 		# all NUM_SEEDS_PER_OBJ for that object)
 		for i in range(NUM_SEEDS_PER_OBJ - seeds.size()):
-			seeds.append(create_seed(Vector3.ZERO, Vector3.ZERO,
-						 Vector3.ZERO, Vector2.ZERO, false))
+			seeds.append( inactive_seed() )
+			seed_nodes.append(null)
+		
+		var active_seedidx := 0
+		for i in range(NUM_SEEDS_PER_OBJ):
+			if not seed_nodes[i] or not seed_nodes[i].Enabled:
+				continue
+			var global_seedidx := num_sdfs * NUM_SEEDS_PER_OBJ + active_seedidx
+			node_to_seedidx_mapping[seed_nodes[i]] = global_seedidx
+			active_seedidx += 1
 
+		# Used to transform the 3D sampling position in world space back to SDF local space
+		var inverse_transform: Transform3D = meshinst.global_transform.affine_inverse()
+		new_scene_data[num_sdfs * NUM_MATRICES_PER_OBJ] = inverse_transform
+		var sdf_mode := int(meshinst.Mode)
+		var blending_factor: float = meshinst.BlendingFactor
 		var data := Transform3D(Vector3(float(mesh_type), float(sdf_mode), blending_factor), mesh_data, Vector3.ZERO, Vector3.ZERO)
-		new_scene_data[num_objects * NUM_MATRICES_PER_OBJ] = inverse_transform
-		new_scene_data[num_objects * NUM_MATRICES_PER_OBJ + 1] = data
+		new_scene_data[num_sdfs * NUM_MATRICES_PER_OBJ + 1] = data
 
 		for i in range(NUM_SEEDS_PER_OBJ):
-			new_seed_data[num_objects * NUM_SEEDS_PER_OBJ + i] = seeds[i]
+			var global_seedidx := num_sdfs * NUM_SEEDS_PER_OBJ + i
+			new_seed_data[global_seedidx] = seeds[i]
+		num_sdfs += 1
+		# Parent has now been stored. Visit its descendants exactly once.
+		num_sdfs = collect_scene_data(
+			meshinst,
+			num_sdfs,
+			new_scene_data,
+			new_seed_data,
+			node_to_seedidx_mapping,
+			seed_links
+		)
 
-		num_objects += 1
-
-	# Connect each seed with every other seed on every other object
-	if MERGE_ALL_SEEDS_BETWEEN_OBJECTS:
-		for i in range(num_objects):
-			for j in range(num_objects):
-				if i == j:
-					continue
-				for s1 in range(NUM_SEEDS_PER_OBJ):
-					var seed1_idx := i * NUM_SEEDS_PER_OBJ + s1
-					if not bool(new_seed_data[seed1_idx].origin.z):
-						continue
-					for s2 in range(NUM_SEEDS_PER_OBJ):
-						var seed2_idx := j * NUM_SEEDS_PER_OBJ + s2
-						if not bool(new_seed_data[seed2_idx].origin.z):
-							continue
-						if PRINT_SEED_CONNECTIONS:
-							log_info("Seed merge: ", seed1_idx, seed2_idx)
-						graph.insert_edge(seed1_idx, seed2_idx)
-						graph.insert_edge(seed2_idx, seed1_idx)
-	
-	# FIXME
-	if $Scene/PlaneAndSphere.visible:
-		graph.insert_edge(0, NUM_SEEDS_PER_OBJ + 1)
-		graph.insert_edge(1, NUM_SEEDS_PER_OBJ + 1)
-		graph.insert_edge(2, NUM_SEEDS_PER_OBJ + 1)
-
-	return num_objects
+	return num_sdfs
 
 
-func visualize_seeds(root_node: Node):
-	if !root_node:
+func inactive_seed() -> Seed:
+	return Seed.new(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO, 0.0, false)
+
+
+func seed_arrays_eq(arrayA: Array[Seed], arrayB: Array[Seed]) -> bool:
+	if arrayA.size() != arrayB.size():
+		return false
+	for i in range(arrayA.size()):
+		var a := arrayA[i]
+		var b := arrayB[i]
+		if not a.eq(b):
+			return false
+	return true
+
+
+func visualize_seeds(root_node: Node) -> void:
+	if not is_instance_valid(root_node):
 		return
-	for node in root_node.get_children():
-		var meshinst = node as SDFMesh
-		if meshinst:
-			for child in node.get_children():
-				child.free()
-	
-	var idx := -1
-	for node in root_node.get_children():
-		var meshinst = node as SDFMesh
-		if !meshinst and node.get_child_count() > 0 and node.is_visible_in_tree():
-			visualize_seeds(node)
-			continue
-		
-		if !VisualizeSeeds or !node.is_visible_in_tree():
-			continue
-		idx += 1
-		
-		var seed_idx := 0
-		for i in range(idx * NUM_SEEDS_PER_OBJ, idx * NUM_SEEDS_PER_OBJ + NUM_SEEDS_PER_OBJ):
-			var seed := seed_data[i]
-			if not bool(seed.origin.z):
-				seed_idx += 1
-				continue
-			var coords: Node3D = COORDINATE_SYSTEM.instantiate()
-			node.add_child(coords)
-			coords.owner = self
-			coords.global_position = seed.basis.x
-			var n := seed.basis.y.cross(seed.basis.z)
-			
-			coords.global_basis.x = seed.basis.y.normalized()
-			coords.global_basis.y = n
-			coords.global_basis.z = seed.basis.z.normalized()
-			coords.get_node("Y").hide()
-			var coords_scale := 0.33
-			if meshinst.mesh is CylinderMesh:
-				coords_scale = min((meshinst.mesh.top_radius + meshinst.mesh.bottom_radius) / 2.0, 0.33)
-			coords.scale *= coords_scale
-			coords.name = "CoordinateSystem " + str(seed_idx)
-			seed_idx += 1
-		
 
+	# Clear old visualizations, including those under hidden meshes.
+	_clear_seed_visualizations(root_node)
+
+	if VisualizeSeeds == 0:
+		return
+
+	var meshes: Array[SDFMesh] = []
+	_collect_visible_sdf_meshes(root_node, meshes)
+
+	for mesh_idx in range(meshes.size()):
+		var meshinst := meshes[mesh_idx]
+		var coords_scale: float = 0.5
+		var cylinder := meshinst.mesh as CylinderMesh
+		if cylinder != null:
+			coords_scale = clampf((cylinder.top_radius + cylinder.bottom_radius) * 0.5, 0.1, 0.5)
+
+		# Your collector packs enabled seeds into consecutive slots.
+		var enabled_seed_idx := 0
+
+		for child in meshinst.get_children():
+			var seed_node := child as ImplicitUVsSeed
+			if seed_node == null or not seed_node.Enabled:
+				continue
+
+			var local_seed_idx := enabled_seed_idx
+			enabled_seed_idx += 1
+			var seed_state: Seed = null
+
+			if VisualizeSeeds != 1:
+				if local_seed_idx >= NUM_SEEDS_PER_OBJ:
+					push_warning(
+						"Too many enabled seeds on %s" % meshinst.name
+					)
+					break
+
+				var global_seed_idx := (
+					mesh_idx * NUM_SEEDS_PER_OBJ + local_seed_idx
+				)
+				if global_seed_idx >= seed_data.size():
+					continue
+
+				seed_state = seed_data[global_seed_idx]
+				if seed_state == null or not seed_state.enabled:
+					continue
+
+			var coords: Node3D = COORDINATE_SYSTEM.instantiate()
+			coords.name = "CoordinateSystem_%d" % local_seed_idx
+			seed_node.add_child(coords)
+			coords.owner = self
+			coords.get_node("Y").hide()
+
+			if VisualizeSeeds == 1:
+				# Before precalc: inherit the seed marker's transform.
+				coords.scale = Vector3.ONE * coords_scale
+			else:
+				# After precalc: use the computed world-space frame.
+				var e1 := seed_state.e1.normalized()
+				var e2 := seed_state.e2.normalized()
+				var frame := Basis(
+					e1,
+					e2.cross(e1).normalized(),
+					e2
+				)
+				coords.global_transform = Transform3D(
+					frame.scaled(Vector3.ONE * coords_scale),
+					seed_state.position
+				)
+
+
+func _collect_visible_sdf_meshes(
+	node: Node,
+	meshes: Array[SDFMesh]
+) -> void:
+	if node is ImplicitUVsLink or node is ImplicitUVsSeed:
+		return
+
+	if node is Node3D and not node.is_visible_in_tree():
+		return
+
+	if node is SDFMesh:
+		meshes.append(node)
+
+	for child in node.get_children():
+		_collect_visible_sdf_meshes(child, meshes)
+
+
+func _clear_seed_visualizations(node: Node) -> void:
+	for child in node.get_children():
+		if node is ImplicitUVsSeed and child is CoordinateSystem:
+			child.free()
+		else:
+			_clear_seed_visualizations(child)
 
 class MergingGraph:
 	# the data used to build the lists
@@ -1006,10 +1202,9 @@ class MergingGraph:
 					return Vector2i(parent, neigh)
 		
 		return Vector2i.ZERO
-
-
-func create_seed(pos: Vector3, e1: Vector3, e2: Vector3, offset: Vector2, active: bool=true) -> Transform3D:
-	return Transform3D(pos, e1, e2, Vector3(offset.x, offset.y, float(active)))
+	
+	func eq(other: MergingGraph) -> bool:
+		return self.data.recursive_equal(other.data, 12)
 
 
 static func log_info(...args):
