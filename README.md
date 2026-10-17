@@ -39,9 +39,10 @@ I tried to make everything as flexible as possible. If something doesn't look ri
 #### CPU side
 ##### GDScript
 The main GDScript code is inside of [main.gd](main.gd). It does the following things:
-- Encodes a part of the Godot scene tree into a representation that can be passed into the compute shader (`Array[Transform3D]` which then gets converted into an array of `mat4`)
+- Encodes a part of the Godot scene tree into a representation that can be passed into the compute shader (which then gets converted into an array of `mat4`)
 - While analysing the scene, collects all the relevant mesh parameters (like radius, size, ...) of all nodes which are of type `SDFMesh` (a custom helper class) to be turned into **signed distance functions** in the compute shader
-- For each `SDFMesh`, also uses the mesh parameters to place **seeds** on the surface of those meshes and merge them together using the `MergingGraph` class
+- While traversing the scene, it looks for nodes of type `ImplicitUVsSeed` (placed under a `SDFMesh`) and uses those as seeds for that object
+- It also looks for nodes of type `ImplicitUVsLink` which define an edge in the merging graph (which seeds should try to form one continuous UV field) and later, it merges those seeds together using the `MergingGraph` class
 - Handles the creation and updating of all buffers, uniforms, pipelines etc. neccessary for executing the compute shader using the `RenderingDevice`
 - After calling the compute shader, reads back some uniforms to pass the data into GDExtension module, which then outputs the results of the linear system optimization. This GDScript script then writes those values back into uniforms so that the next drawing can use them
 
